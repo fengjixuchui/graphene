@@ -24,6 +24,7 @@
 #include <linux/time.h>
 
 #include "api.h"
+#include "gsgx.h"
 #include "pal.h"
 #include "pal_debug.h"
 #include "pal_defs.h"
@@ -92,7 +93,7 @@ static struct pal_cpuid {
 static int pal_cpuid_cache_top      = 0;
 static unsigned int pal_cpuid_clock = 0;
 
-int get_cpuid_from_cache(unsigned int leaf, unsigned int subleaf, unsigned int values[4]) {
+static int get_cpuid_from_cache(unsigned int leaf, unsigned int subleaf, unsigned int values[4]) {
     _DkInternalLock(&cpuid_cache_lock);
 
     for (int i = 0; i < pal_cpuid_cache_top; i++)
@@ -110,7 +111,7 @@ int get_cpuid_from_cache(unsigned int leaf, unsigned int subleaf, unsigned int v
     return -PAL_ERROR_DENIED;
 }
 
-void add_cpuid_to_cache(unsigned int leaf, unsigned int subleaf, unsigned int values[4]) {
+static void add_cpuid_to_cache(unsigned int leaf, unsigned int subleaf, unsigned int values[4]) {
     struct pal_cpuid* chosen;
     _DkInternalLock(&cpuid_cache_lock);
 
@@ -359,6 +360,11 @@ int _DkAttestationQuote(const PAL_PTR user_report_data, PAL_NUM user_report_data
     if (user_report_data_size != sizeof(sgx_report_data_t))
         return -PAL_ERROR_INVAL;
 
+#ifdef SGX_DCAP
+    /* for DCAP attestation, spid and linkable arguments are ignored */
+    sgx_spid_t spid = {0};
+    bool linkable = false;
+#else
     char spid_hex[sizeof(sgx_spid_t) * 2 + 1];
     ssize_t len = get_config(pal_state.root_config, "sgx.ra_client_spid", spid_hex,
                              sizeof(spid_hex));
@@ -386,6 +392,7 @@ int _DkAttestationQuote(const PAL_PTR user_report_data, PAL_NUM user_report_data
     char buf[2];
     len = get_config(pal_state.root_config, "sgx.ra_client_linkable", buf, sizeof(buf));
     bool linkable = (len == 1 && buf[0] == '1');
+#endif
 
     sgx_quote_nonce_t nonce;
     int ret = _DkRandomBitsRead(&nonce, sizeof(nonce));

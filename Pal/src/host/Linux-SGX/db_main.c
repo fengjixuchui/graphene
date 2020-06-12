@@ -85,14 +85,7 @@ PAL_NUM _DkGetHostId (void)
 #include "dynamic_link.h"
 #include <asm/errno.h>
 
-void setup_pal_map (struct link_map * map);
 static struct link_map pal_map;
-
-void init_untrusted_slab_mgr(void);
-int init_enclave(void);
-int init_enclave_key(void);
-int init_child_process(PAL_HANDLE* parent_handle);
-void init_cpuid(void);
 
 /*
  * Creates a dummy file handle with the given name.
@@ -496,23 +489,30 @@ static char * cpu_flags[]
           "pbe",    // "pending break event"
         };
 
-static double get_bogomips(void) {
-    int fd = -1;
-    char buf[0x800] = { 0 };
+static ssize_t read_file_buffer(const char* filename, char* buf, size_t buf_size) {
+    int fd;
 
-    fd = ocall_open("/proc/cpuinfo", O_RDONLY, 0);
-    if (fd < 0) {
-        return 0.0;
-    }
+    fd = ocall_open(filename, O_RDONLY, 0);
+    if (fd < 0)
+        return fd;
 
     /* Although the whole file might not fit in this size, the first cpu description should. */
-    int x = ocall_read(fd, buf, sizeof(buf) - 1);
+    ssize_t n = ocall_read(fd, buf, buf_size);
     ocall_close(fd);
-    if (x < 0) {
-        return 0.0;
-    }
 
-    return sanitize_bogomips_value(get_bogomips_from_cpuinfo_buf(buf, sizeof(buf)));
+    return n;
+}
+
+static double get_bogomips(void) {
+    char buf[2048];
+    ssize_t len;
+
+    len = read_file_buffer("/proc/cpuinfo", buf, sizeof(buf) - 1);
+    if (len < 0)
+        return 0.0;
+    buf[len] = 0;
+
+    return sanitize_bogomips_value(get_bogomips_from_cpuinfo_buf(buf));
 }
 
 int _DkGetCPUInfo (PAL_CPU_INFO * ci)

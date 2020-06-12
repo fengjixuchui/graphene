@@ -133,7 +133,8 @@ void exit_process (int status, uint64_t start_exiting);
 int sgx_ecall (long ecall_no, void * ms);
 int sgx_raise (int event);
 
-void async_exit_pointer (void);
+void async_exit_pointer(void);
+void eresume_pointer(void);
 
 int interrupt_thread (void * tcs);
 int clone_thread (void);
@@ -152,5 +153,7 @@ int sgx_init_child_process(int parent_pipe_fd, struct pal_sec* pal_sec);
 int sgx_signal_setup (void);
 int block_signals (bool block, const int * sigs, int nsig);
 int block_async_signals (bool block);
+
+void load_gdb_command(const char* command);
 
 #endif

@@ -7,10 +7,14 @@ CFLAGS += -fPIC -Winline -Wwrite-strings \
 	  -Werror=implicit-function-declaration \
 	  $(cc-option, -Wnull-dereference) \
 	  -fno-stack-protector -fno-builtin -Wno-inline \
-	  -I../include -I../include/arch/$(ARCH) \
-	  -I../../../Pal/include -I../../../Pal/include/lib -I../../../Pal/include/pal \
-	  -I../../../Pal/include/elf -I../../../Pal/include/lib/$(ARCH) \
-	  -I../../../Pal/include/arch/$(ARCH) -I../../../Pal/include/arch/$(ARCH)/$(PAL_HOST)
+	  -I../include \
+	  -I../include/arch/$(ARCH) \
+	  -I../../../Pal/include \
+	  -I../../../Pal/include/arch/$(ARCH) \
+	  -I../../../Pal/include/arch/$(ARCH)/$(PAL_HOST) \
+	  -I../../../Pal/include/elf \
+	  -I../../../Pal/include/lib \
+	  -I../../../Pal/include/pal
 
 CFLAGS += -Wextra
 
@@ -29,6 +33,7 @@ ASFLAGS += $(defs)
 objs = \
 	shim_async.o \
 	shim_checkpoint.o \
+	shim_context-$(ARCH).o \
 	shim_debug.o \
 	shim_init.o \
 	shim_malloc.o \
@@ -99,7 +104,6 @@ objs = \
 	sys/shim_stat.o \
 	sys/shim_time.o \
 	sys/shim_uname.o \
-	sys/shim_vfork.o \
 	sys/shim_wait.o \
 	sys/shim_wrappers.o \
 	utils/md5.o \
@@ -160,7 +164,7 @@ libsysdb.a: $(objs)
 %.s: %.S
 	$(call cmd,cpp_s_S)
 
-syscallas-$(ARCH).S shim_checkpoint.c: asm-offsets.h
+syscallas-$(ARCH).S shim_context-$(ARCH).c: asm-offsets.h
 
 include ../../../Scripts/Makefile.rules
 

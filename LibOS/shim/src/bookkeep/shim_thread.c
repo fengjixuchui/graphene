@@ -26,11 +26,13 @@
 #include <shim_handle.h>
 #include <shim_vma.h>
 #include <shim_fs.h>
+#include <shim_context.h>
 #include <shim_checkpoint.h>
 #include <shim_utils.h>
 
-#include <pal.h>
+#include <cpu.h>
 #include <list.h>
+#include <pal.h>
 
 #include <linux/signal.h>
 
@@ -44,6 +46,12 @@ static IDTYPE internal_tid_alloc_idx = INTERNAL_TID_BASE;
 PAL_HANDLE thread_start_event = NULL;
 
 //#define DEBUG_REF
+
+#ifdef DEBUG_REF
+#define DEBUG_PRINT_REF_COUNT(rc) debug("%s %p ref_count = %d\n", __func__, handles, rc)
+#else
+#define DEBUG_PRINT_REF_COUNT(rc) __UNUSED(rc)
+#endif
 
 int init_thread (void)
 {
@@ -138,7 +146,7 @@ static IDTYPE get_internal_pid (void)
     return idx;
 }
 
-struct shim_thread * alloc_new_thread (void)
+static struct shim_thread * alloc_new_thread (void)
 {
     struct shim_thread * thread = calloc(1, sizeof(struct shim_thread));
     if (!thread)
@@ -186,11 +194,6 @@ struct shim_thread * get_new_thread (IDTYPE new_tid)
     if (!thread) {
         release_pid(new_tid);
         return NULL;
-    }
-
-    thread->signal_logs = signal_logs_alloc();
-    if (!thread->signal_logs) {
-        goto out_error;
     }
 
     struct shim_thread * cur_thread = get_cur_thread();
@@ -261,9 +264,6 @@ struct shim_thread * get_new_thread (IDTYPE new_tid)
     return thread;
 
 out_error:
-    if (thread->signal_logs) {
-        signal_logs_free(thread->signal_logs);
-    }
     if (thread->handle_map) {
         put_handle_map(thread->handle_map);
     }
@@ -308,19 +308,13 @@ struct shim_thread * get_new_internal_thread (void)
 
 void get_signal_handles(struct shim_signal_handles* handles) {
     int ref_count = REF_INC(handles->ref_count);
-#ifdef DEBUG_REF
-    debug("get_signal_handles %p ref_count = %d\n", handles, ref_count);
-#else
-    __UNUSED(ref_count);
-#endif
+    DEBUG_PRINT_REF_COUNT(ref_count);
 }
 
 void put_signal_handles(struct shim_signal_handles* handles) {
     int ref_count = REF_DEC(handles->ref_count);
 
-#ifdef DEBUG_REF
-    debug("put_signal_handles %p ref_count = %d\n", handles, ref_count);
-#endif
+    DEBUG_PRINT_REF_COUNT(ref_count);
 
     if (!ref_count) {
         destroy_lock(&handles->lock);
@@ -328,26 +322,15 @@ void put_signal_handles(struct shim_signal_handles* handles) {
     }
 }
 
-void get_thread (struct shim_thread * thread)
-{
-#ifdef DEBUG_REF
+void get_thread(struct shim_thread* thread) {
     int ref_count = REF_INC(thread->ref_count);
-
-    debug("get_thread %p(%d) (ref_count = %d)\n", thread, thread->tid,
-          ref_count);
-#else
-    REF_INC(thread->ref_count);
-#endif
+    DEBUG_PRINT_REF_COUNT(ref_count);
 }
 
-void put_thread (struct shim_thread * thread)
-{
+void put_thread(struct shim_thread* thread) {
     int ref_count = REF_DEC(thread->ref_count);
 
-#ifdef DEBUG_REF
-    debug("put_thread %p(%d) (ref_count = %d)\n", thread, thread->tid,
-          ref_count);
-#endif
+    DEBUG_PRINT_REF_COUNT(ref_count);
 
     if (!ref_count) {
         if (thread->pal_handle &&
@@ -361,9 +344,6 @@ void put_thread (struct shim_thread * thread)
         if (thread->child_exit_event)
             DkObjectClose(thread->child_exit_event);
 
-        if (thread->signal_logs) {
-            signal_logs_free(thread->signal_logs);
-        }
         if (thread->handle_map) {
             put_handle_map(thread->handle_map);
         }
@@ -442,39 +422,68 @@ void del_thread (struct shim_thread * thread)
     debug("del_thread(%p, %d, %ld)\n", thread, thread ? (int) thread->tid : -1,
           atomic_read(&thread->ref_count));
 
-    if (is_internal(thread) || LIST_EMPTY(thread, list)) {
+    if (is_internal(thread)) {
         debug("del_thread: internal\n");
         return;
     }
 
     lock(&thread_list_lock);
-    /* thread->list goes on the thread_list */
-    LISTP_DEL_INIT(thread, &thread_list, list);
+    if (!LIST_EMPTY(thread, list)) {
+        LISTP_DEL_INIT(thread, &thread_list, list);
+    }
     unlock(&thread_list_lock);
     put_thread(thread);
 }
 
-static int _check_last_thread(struct shim_thread* self) {
-    assert(locked(&thread_list_lock));
+/*
+ * Atomically marks current thread as dead and returns whether it was the last thread alive.
+ */
+bool mark_self_dead(void) {
+    struct shim_thread* self = get_cur_thread();
+    bool ret = true;
 
-    IDTYPE self_tid = self ? self->tid : 0;
+    lock(&thread_list_lock);
+
+    lock(&self->lock);
+    self->is_alive = false;
+    unlock(&self->lock);
 
     struct shim_thread* thread;
     LISTP_FOR_EACH_ENTRY(thread, &thread_list, list) {
-        if (thread->tid && thread->tid != self_tid && thread->in_vm && thread->is_alive) {
-            return thread->tid;
+        lock(&thread->lock);
+        if (thread->in_vm && thread != self && thread->is_alive) {
+            unlock(&thread->lock);
+            ret = false;
+            break;
         }
+        unlock(&thread->lock);
     }
-    return 0;
+
+    unlock(&thread_list_lock);
+    return ret;
 }
 
-/* Checks for any alive threads apart from thread self. Returns tid of the first found alive thread
- * or 0 if there are no alive threads. self can be NULL, then all threads are checked. */
-int check_last_thread(struct shim_thread* self) {
+/*
+ * Checks whether there are any other threads on `thread_list`.
+ */
+bool check_last_thread(void) {
+    struct shim_thread* self = get_cur_thread();
+    bool ret = true;
+
     lock(&thread_list_lock);
-    int alive_thread_tid = _check_last_thread(self);
+
+    struct shim_thread* thread;
+    LISTP_FOR_EACH_ENTRY(thread, &thread_list, list) {
+        lock(&thread->lock);
+        if (thread->in_vm && thread != self) {
+            unlock(&thread->lock);
+            ret = false;
+            break;
+        }
+        unlock(&thread->lock);
+    }
     unlock(&thread_list_lock);
-    return alive_thread_tid;
+    return ret;
 }
 
 /* This function is called by Async Helper thread to wait on thread->clear_child_tid_pal to be
@@ -486,109 +495,44 @@ void cleanup_thread(IDTYPE caller, void* arg) {
     struct shim_thread* thread = (struct shim_thread*)arg;
     assert(thread);
 
-    int exit_code = thread->term_signal ? : thread->exit_code;
-
     /* wait on clear_child_tid_pal; this signals that PAL layer exited child thread */
-    while (__atomic_load_n(&thread->clear_child_tid_pal, __ATOMIC_RELAXED) != 0) {
-        __asm__ volatile ("pause");
-    }
+    while (__atomic_load_n(&thread->clear_child_tid_pal, __ATOMIC_RELAXED) != 0)
+        cpu_pause();
 
     /* notify parent if any */
     release_clear_child_tid(thread->clear_child_tid);
 
-    /* clean up the thread itself */
-    lock(&thread_list_lock);
-    thread->is_alive = false;
-    LISTP_DEL_INIT(thread, &thread_list, list);
-
-    put_thread(thread);
-
-    if (!_check_last_thread(NULL)) {
-        /* corner case when all application threads exited via exit(), only Async helper
-         * and IPC helper threads are left at this point so simply exit process (recall
-         * that typically processes exit via exit_group()) */
-        unlock(&thread_list_lock);
-        shim_clean_and_exit(exit_code);
-    }
-
-    unlock(&thread_list_lock);
+    /* Clean up the thread itself - this call will remove it from `thread_list`. */
+    del_thread(thread);
 }
 
-int walk_thread_list (int (*callback) (struct shim_thread *, void *, bool *),
-                      void * arg)
-{
-    struct shim_thread * tmp, * n;
-    bool srched = false;
-    int ret;
-    IDTYPE min_tid = 0;
+int walk_thread_list(int (*callback)(struct shim_thread*, void*), void* arg, bool one_shot) {
+    struct shim_thread* tmp;
+    struct shim_thread* n;
+    bool success = false;
+    int ret = -ESRCH;
 
-relock:
     lock(&thread_list_lock);
-
-    debug("walk_thread_list(callback=%p)\n", callback);
 
     LISTP_FOR_EACH_ENTRY_SAFE(tmp, n, &thread_list, list) {
-        if (tmp->tid <= min_tid)
-            continue;
-
-        bool unlocked = false;
-        ret = (*callback) (tmp, arg, &unlocked);
+        ret = callback(tmp, arg);
         if (ret < 0 && ret != -ESRCH) {
-            if (unlocked)
-                goto out;
-            else
-                goto out_locked;
+            goto out;
         }
-        if (ret > 0)
-            srched = true;
-        if (unlocked) {
-            min_tid = tmp->tid;
-            goto relock;
+        if (ret > 0) {
+            if (one_shot) {
+                ret = 0;
+                goto out;
+            }
+            success = true;
         }
     }
 
-    ret = srched ? 0 : -ESRCH;
-out_locked:
-    unlock(&thread_list_lock);
+    ret = success ? 0 : -ESRCH;
 out:
+    unlock(&thread_list_lock);
     return ret;
 }
-
-#ifndef ALIAS_VFORK_AS_FORK
-void switch_dummy_thread (struct shim_thread * thread)
-{
-    struct shim_thread * real_thread = thread->dummy;
-    IDTYPE child = thread->tid;
-
-    assert(thread->frameptr);
-    assert(real_thread->stack);
-    assert(real_thread->stack_top > real_thread->stack);
-
-    memcpy(thread->frameptr, real_thread->stack,
-           real_thread->stack_top - real_thread->stack);
-
-    real_thread->stack     = thread->stack;
-    real_thread->stack_top = thread->stack_top;
-    real_thread->frameptr  = thread->frameptr;
-
-    DkSegmentRegister(PAL_SEGMENT_FS, real_thread->tcb);
-    set_cur_thread(real_thread);
-    debug("set tcb to %p\n", real_thread->tcb);
-
-    debug("jump to the stack %p\n", real_thread->frameptr);
-    debug("shim_vfork success (returning %d)\n", child);
-
-    /* jump onto old stack
-       we actually pop rbp as rsp, and later we will call 'ret' */
-    __asm__ volatile("movq %0, %%rbp\r\n"
-                     "leaveq\r\n"
-                     "retq\r\n" :
-                     : "g"(real_thread->frameptr),
-                       "a"(child)
-                     : "memory");
-    __builtin_unreachable();
-}
-#endif
 
 BEGIN_CP_FUNC(signal_handles)
 {
@@ -660,13 +604,10 @@ BEGIN_CP_FUNC(thread)
 
         new_thread->in_vm  = false;
         new_thread->parent = NULL;
-#ifndef ALIAS_VFORK_AS_FORK
-        new_thread->dummy  = NULL;
-#endif
         new_thread->handle_map = NULL;
         new_thread->root   = NULL;
         new_thread->cwd    = NULL;
-        new_thread->signal_logs = NULL;
+        memset(&new_thread->signal_queue, 0, sizeof(new_thread->signal_queue));
         new_thread->robust_list = NULL;
         REF_SET(new_thread->ref_count, 0);
 
@@ -753,7 +694,6 @@ BEGIN_CP_FUNC(running_thread)
         /* don't export stale pointers */
         new_tcb->self = NULL;
         new_tcb->tp = NULL;
-        new_tcb->context.next = NULL;
         new_tcb->debug_buf = NULL;
     }
 }
@@ -768,7 +708,7 @@ static int resume_wrapper (void * param)
        based on saved thread->shim_tcb */
     shim_tcb_init();
     shim_tcb_t* saved_tcb = thread->shim_tcb;
-    assert(saved_tcb->context.regs && saved_tcb->context.regs->rsp);
+    assert(saved_tcb->context.regs && shim_context_get_sp(&saved_tcb->context));
     set_cur_thread(thread);
     unsigned long fs_base = saved_tcb->context.fs_base;
     assert(fs_base);
@@ -806,10 +746,6 @@ BEGIN_RS_FUNC(running_thread)
         thread->set_child_tid = NULL;
     }
 
-    thread->signal_logs = signal_logs_alloc();
-    if (!thread->signal_logs)
-        return -ENOMEM;
-
     if (cur_thread) {
         PAL_HANDLE handle = DkThreadCreate(resume_wrapper, thread);
         if (!thread)
@@ -825,7 +761,7 @@ BEGIN_RS_FUNC(running_thread)
             __shim_tcb_init(tcb);
             set_cur_thread(thread);
 
-            assert(tcb->context.regs && tcb->context.regs->rsp);
+            assert(tcb->context.regs && shim_context_get_sp(&tcb->context));
             update_fs_base(tcb->context.fs_base);
             /* Temporarily disable preemption until the thread resumes. */
             __disable_preempt(tcb);
@@ -841,6 +777,9 @@ BEGIN_RS_FUNC(running_thread)
              * shim_tcb = NULL
              * in_vm = false
              */
+            if (thread->signal_handles)
+                thread_sigaction_reset_on_execve(thread);
+
             set_cur_thread(thread);
             debug_setbuf(thread->shim_tcb, false);
         }

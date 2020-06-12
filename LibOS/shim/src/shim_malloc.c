@@ -68,7 +68,7 @@ void* __system_malloc(size_t size) {
             /* If the allocation is interrupted by signal, try to handle the
              * signal and then retry the allocation. */
             if (PAL_NATIVE_ERRNO == PAL_ERROR_INTERRUPTED) {
-                handle_signal();
+                handle_signals();
                 continue;
             }
 
@@ -106,14 +106,6 @@ int init_slab(void) {
 }
 
 EXTERN_ALIAS(init_slab);
-
-int reinit_slab(void) {
-    if (slab_mgr) {
-        destroy_slab_mgr(slab_mgr);
-        slab_mgr = NULL;
-    }
-    return 0;
-}
 
 #if defined(SLAB_DEBUG_PRINT) || defined(SLABD_DEBUG_TRACE)
 void* __malloc_debug(size_t size, const char* file, int line)

@@ -233,8 +233,7 @@ int load_enclave_binary (sgx_arch_secs_t * secs, int fd,
     return 0;
 }
 
-int initialize_enclave (struct pal_enclave * enclave)
-{
+static int initialize_enclave(struct pal_enclave* enclave) {
     int ret = 0;
     int                    enclave_image = -1;
     char*                  enclave_uri = NULL;
@@ -322,6 +321,11 @@ int initialize_enclave (struct pal_enclave * enclave)
     } else {
         enclave->baseaddr = ENCLAVE_HIGH_ADDRESS;
         heap_min = 0;
+    }
+
+    if (get_config(enclave->config, "sgx.print_stats", cfgbuf, sizeof(cfgbuf)) > 0 &&
+            cfgbuf[0] == '1') {
+        g_sgx_print_stats = true;
     }
 
     ret = read_enclave_token(enclave->token, &enclave_token);
@@ -619,8 +623,9 @@ int initialize_enclave (struct pal_enclave * enclave)
         dbg->pid = INLINE_SYSCALL(getpid, 0);
         dbg->base = enclave->baseaddr;
         dbg->size = enclave->size;
-        dbg->ssaframesize = enclave->ssaframesize;
-        dbg->aep  = async_exit_pointer;
+        dbg->ssaframesize   = enclave->ssaframesize;
+        dbg->aep            = async_exit_pointer;
+        dbg->eresume        = eresume_pointer;
         dbg->thread_tids[0] = dbg->pid;
         for (int i = 0 ; i < MAX_DBG_THREADS ; i++)
             dbg->tcs_addrs[i] = tcs_addrs[i];
@@ -897,8 +902,17 @@ static int load_enclave (struct pal_enclave * enclave,
     if (ret < 0)
         return ret;
 
-    if (get_config(enclave->config, "sgx.ra_client_spid", cfgbuf, sizeof(cfgbuf)) > 0) {
-        /* initialize communication with Quoting Enclave only if app requests Quote retrieval */
+    if (get_config(enclave->config, "sgx.remote_attestation", cfgbuf, sizeof(cfgbuf)) < 0 &&
+            (get_config(enclave->config, "sgx.ra_client_spid", cfgbuf, sizeof(cfgbuf)) > 0 ||
+             get_config(enclave->config, "sgx.ra_client_linkable", cfgbuf, sizeof(cfgbuf)) > 0)) {
+        SGX_DBG(DBG_E, "Detected EPID remote attestation parameters \'ra_client_spid\' and/or "
+                "\'ra_client_linkable\' in the manifest but no \'remote_attestation\' parameter. "
+                "Please add \'sgx.remote_attestation = 1\' to the manifest.\n");
+        return -EINVAL;
+    }
+
+    if (get_config(enclave->config, "sgx.remote_attestation", cfgbuf, sizeof(cfgbuf)) > 0) {
+        /* initialize communication with Quoting Enclave only if app requests attestation */
         ret = init_quoting_enclave_targetinfo(&pal_sec->qe_targetinfo);
         if (ret < 0)
             return ret;

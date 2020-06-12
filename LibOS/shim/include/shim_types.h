@@ -24,7 +24,6 @@
 #include <asm/posix_types.h>
 #include <asm/statfs.h>
 #include <asm/stat.h>
-#include <asm/ldt.h>
 #include <asm/signal.h>
 #include <asm/siginfo.h>
 #include <asm/poll.h>
@@ -156,7 +155,7 @@ struct __kernel_sigaction {
     __sighandler_t k_sa_handler;
     unsigned long sa_flags;
     void (*sa_restorer) (void);
-    sigset_t sa_mask;
+    __sigset_t sa_mask;
 };
 
 /* linux/aio_abi.h (for io_setup which has no glibc wrapper) */

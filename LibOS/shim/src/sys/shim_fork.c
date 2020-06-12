@@ -17,21 +17,23 @@
 /*
  * shim_fork.c
  *
- * Implementation of system call "fork".
+ * Implementation of system calls "fork" and "vfork".
  */
+
+#include "shim_fork.h"
 
 #include <errno.h>
 #include <linux/futex.h>
 #include <sys/mman.h>
 #include <sys/syscall.h>
 
-#include <pal.h>
-#include <pal_error.h>
-#include <shim_checkpoint.h>
-#include <shim_internal.h>
-#include <shim_ipc.h>
-#include <shim_table.h>
-#include <shim_thread.h>
+#include "pal.h"
+#include "pal_error.h"
+#include "shim_checkpoint.h"
+#include "shim_internal.h"
+#include "shim_ipc.h"
+#include "shim_table.h"
+#include "shim_thread.h"
 
 static BEGIN_MIGRATION_DEF(fork, struct shim_thread* thread, struct shim_process* process) {
     DEFINE_MIGRATE(process, process, sizeof(struct shim_process));
@@ -98,4 +100,13 @@ int shim_do_fork(void) {
     IDTYPE tid = new_thread->tid;
     put_thread(new_thread);
     return tid;
+}
+
+/* Instead of trying to support Linux semantics for vfork() -- which requires adding corner-cases in
+ * signal handling and syscalls -- we simply treat vfork() as fork(). We assume that performance hit
+ * is negligible (Graphene has to migrate internal state anyway which is slow) and apps do not rely
+ * on insane Linux-specific semantics of vfork().  */
+int shim_do_vfork(void) {
+    debug("vfork() was called by the application, implemented as alias to fork() in Graphene\n");
+    return shim_do_fork();
 }

@@ -1,3 +1,4 @@
+#include "cpu.h"
 #include "ecall_types.h"
 #include "ocall_types.h"
 #include "pal_linux_error.h"
@@ -5,6 +6,7 @@
 #include "rpc_queue.h"
 #include "sgx_enclave.h"
 #include "sgx_internal.h"
+#include "sgx_tls.h"
 
 #include <asm/errno.h>
 #include <asm/ioctls.h>
@@ -55,8 +57,10 @@ static long sgx_ocall_exit(void* pms)
     }
 
     /* exit the whole process if exit_group() */
-    if (ms->ms_is_exitgroup)
+    if (ms->ms_is_exitgroup) {
+        update_and_print_stats(/*process_wide=*/true);
         INLINE_SYSCALL(exit_group, 1, (int)ms->ms_exitcode);
+    }
 
     /* otherwise call SGX-related thread reset and exit this thread */
     block_async_signals(true);
@@ -66,6 +70,7 @@ static long sgx_ocall_exit(void* pms)
 
     if (!current_enclave_thread_cnt()) {
         /* no enclave threads left, kill the whole process */
+        update_and_print_stats(/*process_wide=*/true);
         INLINE_SYSCALL(exit_group, 1, (int)ms->ms_exitcode);
     }
 
@@ -644,8 +649,6 @@ static long sgx_ocall_eventfd (void * pms)
     return ret;
 }
 
-void load_gdb_command (const char * command);
-
 static long sgx_ocall_load_debug(void * pms)
 {
     const char * command = (const char *) pms;
@@ -724,7 +727,7 @@ static int rpc_thread_loop(void* arg) {
     while (1) {
         rpc_request_t* req = rpc_dequeue(g_rpc_queue);
         if (!req) {
-            __asm__ volatile("pause");
+            cpu_pause();
             continue;
         }
 

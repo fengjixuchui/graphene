@@ -4,8 +4,13 @@
 #include <shim_types.h>
 #include <shim_unistd.h>
 #include <stdnoreturn.h>
+#if defined(__i386__) || defined (__x86_64__)
+#include <asm/ldt.h>
+#endif
 
 #ifdef IN_SHIM
+
+void debug_unsupp(int num);
 
 typedef void (*shim_fp)(void);
 
@@ -329,6 +334,8 @@ int shim_do_close(int fd);
 int shim_do_stat(const char* file, struct stat* statbuf);
 int shim_do_fstat(int fd, struct stat* statbuf);
 int shim_do_lstat(const char* file, struct stat* stat);
+int shim_do_statfs(const char* path, struct statfs* buf);
+int shim_do_fstatfs(int fd, struct statfs* buf);
 int shim_do_poll(struct pollfd* fds, nfds_t nfds, int timeout);
 off_t shim_do_lseek(int fd, off_t offset, int origin);
 void* shim_do_mmap(void* addr, size_t length, int prot, int flags, int fd, off_t offset);
@@ -417,6 +424,7 @@ int shim_do_fchown(int fd, uid_t user, gid_t group);
 mode_t shim_do_umask(mode_t mask);
 int shim_do_gettimeofday(struct __kernel_timeval* tv, struct __kernel_timezone* tz);
 int shim_do_getrlimit(int resource, struct __kernel_rlimit* rlim);
+int shim_do_getrusage(int who, struct __kernel_rusage* ru);
 uid_t shim_do_getuid(void);
 gid_t shim_do_getgid(void);
 int shim_do_setuid(uid_t uid);
@@ -497,6 +505,7 @@ int shim_do_prlimit64(pid_t pid, int resource, const struct __kernel_rlimit64* n
 ssize_t shim_do_sendmmsg(int sockfd, struct mmsghdr* msg, unsigned int vlen, int flags);
 int shim_do_eventfd2(unsigned int count, int flags);
 int shim_do_eventfd(unsigned int count);
+int shim_do_getcpu(unsigned* cpu, unsigned* node, struct getcpu_cache* unused);
 
 /* libos call implementation */
 int shim_do_msgpersist(int msqid, int cmd);
@@ -711,14 +720,18 @@ time_t shim_time(time_t* tloc);
 int shim_futex(int* uaddr, int op, int val, void* utime, int* uaddr2, int val3);
 int shim_sched_setaffinity(pid_t pid, size_t len, __kernel_cpu_set_t* user_mask_ptr);
 int shim_sched_getaffinity(pid_t pid, size_t len, __kernel_cpu_set_t* user_mask_ptr);
+#if defined(__i386__) || defined(__x86_64__)
 int shim_set_thread_area(struct user_desc* u_info);
+#endif
 int shim_io_setup(unsigned nr_reqs, aio_context_t* ctx);
 int shim_io_destroy(aio_context_t ctx);
 int shim_io_getevents(aio_context_t ctx_id, long min_nr, long nr, struct io_event* events,
                       struct timespec* timeout);
 int shim_io_submit(aio_context_t ctx_id, long nr, struct iocb** iocbpp);
 int shim_io_cancel(aio_context_t ctx_id, struct iocb* iocb, struct io_event* result);
+#if defined(__i386__) || defined(__x86_64__)
 int shim_get_thread_area(struct user_desc* u_info);
+#endif
 int shim_lookup_dcookie(unsigned long cookie64, char* buf, size_t len);
 int shim_epoll_create(int size);
 int shim_remap_file_pages(void* start, size_t size, int prot, ssize_t pgoff, int flags);
@@ -821,6 +834,7 @@ ssize_t shim_recvmmsg(int sockfd, struct mmsghdr* msg, unsigned int vlen, int fl
 int shim_prlimit64(pid_t pid, int resource, const struct __kernel_rlimit64* new_rlim,
                    struct __kernel_rlimit64* old_rlim);
 ssize_t shim_sendmmsg(int sockfd, struct mmsghdr* msg, unsigned int vlen, int flags);
+int shim_getcpu(unsigned* cpu, unsigned* node, struct getcpu_cache* unused);
 
 /* libos call wrappers */
 int shim_msgpersist(int msqid, int cmd);

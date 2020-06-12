@@ -38,16 +38,6 @@
 #include <elf/elf.h>
 #include <sysdeps/generic/ldsodefs.h>
 
-__asm__ (
-    ".global pal_start\n"
-    "    .type pal_start,@function\n"
-    "pal_start:\n"
-    "    movq %rsp, %rdi\n" /* 1st arg for pal_linux_main: initial RSP */
-    "    movq %rdx, %rsi\n" /* 2nd arg: fini callback */
-    "    xorq %rbp, %rbp\n" /* mark the last stack frame with RBP == 0 (for debuggers) */
-    "    andq $~15, %rsp\n"
-    "    call pal_linux_main\n");
-
 #define RTLD_BOOTSTRAP
 
 /* pal_start is the entry point of libpal.so, which calls pal_main */
@@ -171,8 +161,6 @@ PAL_NUM _DkGetHostId (void)
 }
 
 #include "dynamic_link.h"
-
-void setup_pal_map (struct link_map * map);
 
 #if USE_VDSO_GETTIME == 1
 void setup_vdso_map (ElfW(Addr) addr);
@@ -363,7 +351,7 @@ static char * cpu_flags[]
  * Returns the number of online CPUs read from /sys/devices/system/cpu/online, -errno on failure.
  * Understands complex formats like "1,3-5,6".
  */
-int get_cpu_count(void) {
+static int get_cpu_count(void) {
     int fd = INLINE_SYSCALL(open, 3, "/sys/devices/system/cpu/online", O_RDONLY|O_CLOEXEC, 0);
     if (fd < 0)
         return unix_to_pal_error(ERRNO(fd));
@@ -406,23 +394,29 @@ int get_cpu_count(void) {
     return cpu_count;
 }
 
-static double get_bogomips(void) {
-    int fd = -1;
-    char buf[0x800] = { 0 };
+static ssize_t read_file_buffer(const char* filename, char* buf, size_t buf_size) {
+    int fd;
 
-    fd = INLINE_SYSCALL(open, 2, "/proc/cpuinfo", O_RDONLY);
-    if (fd < 0) {
-        return 0.0;
-    }
+    fd = INLINE_SYSCALL(open, 2, filename, O_RDONLY);
+    if (fd < 0)
+        return fd;
 
-    /* Although the whole file might not fit in this size, the first cpu description should. */
-    long x = INLINE_SYSCALL(read, 3, fd, buf, sizeof(buf) - 1);
+    ssize_t n = INLINE_SYSCALL(read, 3, fd, buf, buf_size);
     INLINE_SYSCALL(close, 1, fd);
-    if (x < 0) {
-        return 0.0;
-    }
 
-    return sanitize_bogomips_value(get_bogomips_from_cpuinfo_buf(buf, sizeof(buf)));
+    return n;
+}
+
+static double get_bogomips(void) {
+    char buf[2048];
+    ssize_t len;
+
+    len = read_file_buffer("/proc/cpuinfo", buf, sizeof(buf) - 1);
+    if (len < 0)
+        return 0.0;
+    buf[len] = 0;
+
+    return sanitize_bogomips_value(get_bogomips_from_cpuinfo_buf(buf));
 }
 
 int _DkGetCPUInfo (PAL_CPU_INFO * ci)

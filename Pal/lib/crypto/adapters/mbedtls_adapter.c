@@ -15,8 +15,9 @@
    You should have received a copy of the GNU Lesser General Public License
    along with this program.  If not, see <http://www.gnu.org/licenses/>.  */
 
+#include "mbedtls_adapter.h"
+
 #include <errno.h>
-#include <immintrin.h>
 #include <limits.h>
 #include <stdint.h>
 
@@ -28,10 +29,12 @@
 #include "assert.h"
 #include "mbedtls/aes.h"
 #include "mbedtls/cmac.h"
+#include "mbedtls/entropy_poll.h"
 #include "mbedtls/error.h"
 #include "mbedtls/net_sockets.h"
 #include "mbedtls/rsa.h"
 #include "mbedtls/sha256.h"
+#include "rng-arch.h"
 
 int mbedtls_to_pal_error(int error)
 {
@@ -110,6 +113,9 @@ int mbedtls_to_pal_error(int error)
         case MBEDTLS_ERR_SSL_ASYNC_IN_PROGRESS:
         case MBEDTLS_ERR_SSL_CRYPTO_IN_PROGRESS:
             return -PAL_ERROR_TRYAGAIN;
+
+        case MBEDTLS_ERR_NET_CONN_RESET:
+            return -PAL_ERROR_CONNFAILED_PIPE;
 
         default:
             return -PAL_ERROR_DENIED;
@@ -332,8 +338,7 @@ int mbedtls_hardware_poll(void* data, unsigned char* output, size_t len, size_t*
 
     unsigned long long rand64;
     for (size_t i = 0; i < len; i += sizeof(rand64)) {
-        while (__builtin_ia32_rdrand64_step(&rand64) == 0)
-            /*nop*/;
+        rand64 = get_rand64();
         size_t over = i + sizeof(rand64) < len ? 0 : i + sizeof(rand64) - len;
         memcpy(output + i, &rand64, sizeof(rand64) - over);
     }
@@ -357,6 +362,8 @@ static int recv_cb(void* ctx, uint8_t* buf, size_t len) {
     if (ret < 0) {
         if (ret == -EINTR || ret == -EAGAIN || ret == -EWOULDBLOCK)
             return MBEDTLS_ERR_SSL_WANT_READ;
+        if (ret == -EPIPE)
+            return MBEDTLS_ERR_NET_CONN_RESET;
         return MBEDTLS_ERR_NET_RECV_FAILED;
     }
 
@@ -377,6 +384,8 @@ static int send_cb(void* ctx, uint8_t const* buf, size_t len) {
     if (ret < 0) {
         if (ret == -EINTR || ret == -EAGAIN || ret == -EWOULDBLOCK)
             return MBEDTLS_ERR_SSL_WANT_WRITE;
+        if (ret == -EPIPE)
+            return MBEDTLS_ERR_NET_CONN_RESET;
         return MBEDTLS_ERR_NET_SEND_FAILED;
     }
 

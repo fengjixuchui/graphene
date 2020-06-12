@@ -2,9 +2,16 @@ include ../../Scripts/Makefile.configs
 include ../../Scripts/Makefile.rules
 include ../src/host/$(PAL_HOST)/Makefile.am
 
-CFLAGS += -I../include/lib -I../include -I../include/pal -I../include/arch/$(ARCH) \
-          -I../include/arch/$(ARCH)/$(PAL_HOST) -I../include/host/$(PAL_HOST) \
-          -I../src/host/$(PAL_HOST) -Icrypto/mbedtls/include -Icrypto/mbedtls/crypto/include
+CFLAGS += \
+	-I../include \
+	-I../include/arch/$(ARCH) \
+	-I../include/arch/$(ARCH)/$(PAL_HOST) \
+	-I../include/host/$(PAL_HOST) \
+	-I../include/lib \
+	-I../include/pal \
+	-I../src/host/$(PAL_HOST) \
+	-Icrypto/mbedtls/include \
+	-Icrypto/mbedtls/crypto/include
 
 CRYPTO_PROVIDER ?= mbedtls
 
@@ -19,7 +26,6 @@ CRYPTO_PROVIDER ?= mbedtls
 ifeq ($(CRYPTO_PROVIDER),mbedtls)
 crypto_mbedtls_library_objs = \
 	crypto/mbedtls/crypto/library/aes.o \
-	crypto/mbedtls/crypto/library/aesni.o \
 	crypto/mbedtls/crypto/library/base64.o \
 	crypto/mbedtls/crypto/library/bignum.o \
 	crypto/mbedtls/crypto/library/cipher.o \
@@ -40,6 +46,10 @@ crypto_mbedtls_library_objs = \
 	crypto/mbedtls/library/ssl_msg.o \
 	crypto/mbedtls/library/ssl_srv.o \
 	crypto/mbedtls/library/ssl_tls.o
+ifeq ($(ARCH),x86_64)
+crypto_mbedtls_library_objs += \
+	crypto/mbedtls/crypto/library/aesni.o
+endif
 
 objs += $(crypto_mbedtls_library_objs)
 endif
@@ -107,12 +117,16 @@ objs += \
 	string/strcmp.o \
 	string/strendswith.o \
 	string/strlen.o \
+	string/strstr.o \
 	string/wordcopy.o
 
 $(addprefix $(target),crypto/adapters/mbedtls_adapter.o crypto/adapters/mbedtls_dh.o crypto/adapters/mbedtls_encoding.o): crypto/mbedtls/crypto/library/aes.c
 
 ifeq ($(CRYPTO_PROVIDER),mbedtls)
-CFLAGS += -DCRYPTO_USE_MBEDTLS -mrdrnd
+CFLAGS += -DCRYPTO_USE_MBEDTLS
+ifeq ($(ARCH),x86_64)
+CFLAGS += -mrdrnd
+endif
 objs += crypto/adapters/mbedtls_adapter.o
 objs += crypto/adapters/mbedtls_dh.o
 objs += crypto/adapters/mbedtls_encoding.o

@@ -20,6 +20,7 @@
  * This file contains entry and exit functions of library OS.
  */
 
+#include <shim_context.h>
 #include <shim_defs.h>
 #include <shim_internal.h>
 #include <shim_table.h>
@@ -75,11 +76,6 @@ void warn (const char *format, ...)
     va_start (args, format);
     __SYS_VPRINTF(format, args);
     va_end (args);
-}
-
-
-void __stack_chk_fail (void)
-{
 }
 
 static int pal_errno_to_unix_errno [PAL_ERROR_NATIVE_COUNT + 1] = {
@@ -358,8 +354,7 @@ int init_stack (const char ** argv, const char ** envp,
     return 0;
 }
 
-int read_environs (const char ** envp)
-{
+static int read_environs(const char** envp) {
     for (const char ** e = envp ; *e ; e++) {
         if (strstartswith_static(*e, "LD_LIBRARY_PATH=")) {
             /* populate library_paths with entries from LD_LIBRARY_PATH envvar */
@@ -624,7 +619,7 @@ noreturn void* shim_init(int argc, void* args)
     shim_tcb_t * cur_tcb = shim_get_tcb();
     struct shim_thread * cur_thread = (struct shim_thread *) cur_tcb->tp;
 
-    if (cur_tcb->context.regs && cur_tcb->context.regs->rsp) {
+    if (cur_tcb->context.regs && shim_context_get_sp(&cur_tcb->context)) {
         vdso_map_migrate();
         restore_context(&cur_tcb->context);
     }

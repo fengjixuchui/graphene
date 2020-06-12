@@ -37,7 +37,8 @@ How to Build and Run Graphene?
 ==============================
 
 See :doc:`quickstart` for instructions how to quickly build and run Graphene.
-For full build instructions, see :doc:`building`.
+For full build instructions, see :doc:`building`. To deploy Graphene in the
+cloud, see :doc:`cloud-deployment`.
 
 How to Contact the Maintainers?
 ===============================
@@ -65,9 +66,11 @@ Table of Contents
 
    quickstart
    building
+   cloud-deployment
    manifest-syntax
    supported-syscalls
    sample-apps
+   sgx-intro
    glossary
    howto-doc
 
@@ -87,8 +90,6 @@ Table of Contents
    devel/setup
    devel/debugging
    devel/new-syscall
-   devel/sgx-process-creation
-   devel/signal-handling
 
 .. toctree::
    :caption: LibOS

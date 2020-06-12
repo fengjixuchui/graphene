@@ -1,11 +1,24 @@
 include ../../../../Scripts/Makefile.configs
 include Makefile.am
 
-CFLAGS	+= -I. -Iinclude -I../.. -I../../../include -I../../../include/pal \
-	-I../../../include/arch/$(ARCH) -I../../../include/arch/$(ARCH)/Linux \
-	-I../../../include/host/Linux -I../../../include/lib -I../../../include/lib/$(ARCH) \
-	-I../../../include/host/Linux-common
-ASFLAGS += -I. -Iinclude -I../.. -I../../../include -I../../../include/arch/$(ARCH)/Linux
+CFLAGS	+= \
+	-I. \
+	-Iinclude \
+	-I../.. \
+	-I../../../include \
+	-I../../../include/pal \
+	-I../../../include/arch/$(ARCH) \
+	-I../../../include/arch/$(ARCH)/Linux \
+	-I../../../include/host/Linux \
+	-I../../../include/host/Linux-common \
+	-I../../../include/lib
+
+ASFLAGS += \
+	-I. \
+	-Iinclude \
+	-I../.. \
+	-I../../../include \
+	-I../../../include/arch/$(ARCH)/Linux
 
 host_files = libpal-Linux.a pal.map
 
@@ -33,7 +46,8 @@ objs = \
 	db_sockets.o \
 	db_streams.o \
 	db_threading.o \
-	$(commons_objs)
+	$(commons_objs) \
+	pal_start-$(ARCH).o
 
 graphene_lib = .lib/graphene-lib.a
 

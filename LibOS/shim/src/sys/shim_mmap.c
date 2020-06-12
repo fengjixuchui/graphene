@@ -34,27 +34,36 @@
 #include "shim_table.h"
 #include "shim_vma.h"
 
-#define LEGACY_MAP_MASK (MAP_SHARED         \
-                       | MAP_PRIVATE        \
-                       | MAP_FIXED          \
-                       | MAP_ANONYMOUS      \
-                       | MAP_DENYWRITE      \
-                       | MAP_EXECUTABLE     \
-                       | MAP_UNINITIALIZED  \
-                       | MAP_GROWSDOWN      \
-                       | MAP_LOCKED         \
-                       | MAP_NORESERVE      \
-                       | MAP_POPULATE       \
-                       | MAP_NONBLOCK       \
-                       | MAP_STACK          \
-                       | MAP_HUGETLB        \
-                       | MAP_32BIT          \
-                       | MAP_HUGE_2MB       \
+#ifdef MAP_32BIT /* x86_64-specific */
+#define MAP_32BIT_IF_SUPPORTED  MAP_32BIT
+#else
+#define MAP_32BIT_IF_SUPPORTED  0
+#endif
+
+#define LEGACY_MAP_MASK (MAP_SHARED             \
+                       | MAP_PRIVATE            \
+                       | MAP_FIXED              \
+                       | MAP_ANONYMOUS          \
+                       | MAP_DENYWRITE          \
+                       | MAP_EXECUTABLE         \
+                       | MAP_UNINITIALIZED      \
+                       | MAP_GROWSDOWN          \
+                       | MAP_LOCKED             \
+                       | MAP_NORESERVE          \
+                       | MAP_POPULATE           \
+                       | MAP_NONBLOCK           \
+                       | MAP_STACK              \
+                       | MAP_HUGETLB            \
+                       | MAP_32BIT_IF_SUPPORTED \
+                       | MAP_HUGE_2MB           \
                        | MAP_HUGE_1GB)
 
 void* shim_do_mmap(void* addr, size_t length, int prot, int flags, int fd, off_t offset) {
     struct shim_handle* hdl = NULL;
     long ret                = 0;
+
+    if (!(flags & MAP_FIXED) && addr)
+        addr = ALLOC_ALIGN_DOWN_PTR(addr);
 
     /*
      * According to the manpage, both addr and offset have to be page-aligned,
@@ -128,9 +137,11 @@ void* shim_do_mmap(void* addr, size_t length, int prot, int flags, int fd, off_t
         }
     }
 
+#ifdef MAP_32BIT
     /* ignore MAP_32BIT when MAP_FIXED is set */
     if ((flags & (MAP_32BIT | MAP_FIXED)) == (MAP_32BIT | MAP_FIXED))
         flags &= ~MAP_32BIT;
+#endif
 
     if (flags & (MAP_FIXED | MAP_FIXED_NOREPLACE)) {
         /* We know that `addr + length` does not overflow (`access_ok` above). */

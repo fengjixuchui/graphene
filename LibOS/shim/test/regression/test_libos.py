@@ -12,7 +12,7 @@ from regression import (
 
 class TC_00_Unittests(RegressionTestCase):
     def test_000_spinlock(self):
-        stdout, _ = self.run_binary(['spinlock'])
+        stdout, _ = self.run_binary(['spinlock'], timeout=20)
 
         self.assertIn('Test successful!', stdout)
 
@@ -105,6 +105,13 @@ class TC_01_Bootstrap(RegressionTestCase):
         stdout, _ = self.run_binary(['system'], timeout=60)
         self.assertIn('hello from system', stdout)
 
+    def test_205_exec_fork(self):
+        stdout, _ = self.run_binary(['exec_fork'], timeout=60)
+        self.assertNotIn('Handled SIGCHLD', stdout)
+        self.assertIn('Set up handler for SIGCHLD', stdout)
+        self.assertIn('child exited with status: 0', stdout)
+        self.assertIn('test completed successfully', stdout)
+
     def test_210_exec_invalid_args(self):
         stdout, _ = self.run_binary(['exec_invalid_args'])
 
@@ -144,9 +151,10 @@ class TC_01_Bootstrap(RegressionTestCase):
         with self.expect_returncode(134):
             self.run_binary(['abort_multithread'])
 
-    def test_404_sigprocmask(self):
-        with self.expect_returncode(113):
-            self.run_binary(['sigprocmask'])
+    def test_404_sigprocmask_pending(self):
+        stdout, _ = self.run_binary(['sigprocmask_pending'], timeout=60)
+        self.assertIn('Child OK', stdout)
+        self.assertIn('All tests OK', stdout)
 
     def test_500_init_fail(self):
         try:
@@ -210,10 +218,16 @@ class TC_03_FileCheckPolicy(RegressionTestCase):
         self.assertIn('file_check_policy succeeded', stdout)
 
 @unittest.skipUnless(HAS_SGX,
-    'This test is only meaningful on SGX PAL because only SGX supports attestation.')
+    'These tests are only meaningful on SGX PAL because only SGX supports attestation.')
 class TC_04_Attestation(RegressionTestCase):
     def test_000_attestation(self):
         stdout, _ = self.run_binary(['attestation'], timeout=60)
+        self.assertIn("Test resource leaks in attestation filesystem... SUCCESS", stdout)
+        self.assertIn("Test local attestation... SUCCESS", stdout)
+        self.assertIn("Test quote interface... SUCCESS", stdout)
+
+    def test_001_attestation_stdio(self):
+        stdout, _ = self.run_binary(['attestation', 'test_stdio'], timeout=60)
         self.assertIn("Test resource leaks in attestation filesystem... SUCCESS", stdout)
         self.assertIn("Test local attestation... SUCCESS", stdout)
         self.assertIn("Test quote interface... SUCCESS", stdout)
@@ -394,7 +408,6 @@ class TC_30_Syscall(RegressionTestCase):
         stdout, _ = self.run_binary(['sigaction_per_process'])
         self.assertIn('TEST OK', stdout)
 
-    @unittest.skipIf(HAS_SGX, 'No SIGPIPE support on SGX, yet.')
     def test_092_sighandler_sigpipe(self):
         try:
             self.run_binary(['sighandler_sigpipe'])
@@ -407,6 +420,10 @@ class TC_30_Syscall(RegressionTestCase):
             self.assertIn('Got signal 13', stdout)
             self.assertIn('Got 1 SIGPIPE signal(s)', stdout)
             self.assertIn('Could not write to pipe: Broken pipe', stdout)
+
+    def test_093_signal_multithread(self):
+        stdout, _ = self.run_binary(['signal_multithread'])
+        self.assertIn('TEST OK', stdout)
 
 @unittest.skipUnless(HAS_SGX,
     'This test is only meaningful on SGX PAL because only SGX catches raw '
