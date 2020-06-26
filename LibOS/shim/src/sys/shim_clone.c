@@ -1,18 +1,5 @@
-/* Copyright (C) 2014 Stony Brook University
-   This file is part of Graphene Library OS.
-
-   Graphene Library OS is free software: you can redistribute it and/or
-   modify it under the terms of the GNU Lesser General Public License
-   as published by the Free Software Foundation, either version 3 of the
-   License, or (at your option) any later version.
-
-   Graphene Library OS is distributed in the hope that it will be useful,
-   but WITHOUT ANY WARRANTY; without even the implied warranty of
-   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-   GNU Lesser General Public License for more details.
-
-   You should have received a copy of the GNU Lesser General Public License
-   along with this program.  If not, see <http://www.gnu.org/licenses/>.  */
+/* SPDX-License-Identifier: LGPL-3.0-or-later */
+/* Copyright (C) 2014 Stony Brook University */
 
 /*
  * shim_clone.c
@@ -144,7 +131,7 @@ static int clone_implementation_wrapper(struct shim_clone_args * arg)
     //user_stack_addr[1] ==> arguments to user provided function.
 
     debug("child swapping stack to %p return 0x%lx: %d\n",
-          stack, regs.rip, my_thread->tid);
+          stack, shim_regs_get_ip(&regs), my_thread->tid);
 
     tcb->context.regs = &regs;
     fixup_child_context(tcb->context.regs);
@@ -316,7 +303,7 @@ int shim_do_clone (int flags, void * user_stack_addr, int * parent_tidptr,
             ret = -EINVAL;
             goto failed;
         }
-        fs_base = (unsigned long)tls;
+        fs_base = tls_to_fs_base((unsigned long)tls);
     }
 
     if (!(flags & CLONE_THREAD))
@@ -370,7 +357,7 @@ int shim_do_clone (int flags, void * user_stack_addr, int * parent_tidptr,
         add_thread(thread);
         set_as_child(self, thread);
 
-        ret = do_migrate_process(&migrate_fork, NULL, NULL, thread);
+        ret = create_process_and_send_checkpoint(&migrate_fork, /*exec=*/NULL, thread);
         thread->shim_tcb = NULL; /* cpu context of forked thread isn't
                                   * needed any more */
         if (parent_stack)
@@ -401,13 +388,13 @@ int shim_do_clone (int flags, void * user_stack_addr, int * parent_tidptr,
 
     new_args.create_event = DkNotificationEventCreate(PAL_FALSE);
     if (!new_args.create_event) {
-        ret = -PAL_ERRNO;
+        ret = -PAL_ERRNO();
         goto clone_thread_failed;
     }
 
     new_args.initialize_event = DkNotificationEventCreate(PAL_FALSE);
     if (!new_args.initialize_event) {
-        ret = -PAL_ERRNO;
+        ret = -PAL_ERRNO();
         goto clone_thread_failed;
     }
 
@@ -428,7 +415,7 @@ int shim_do_clone (int flags, void * user_stack_addr, int * parent_tidptr,
     PAL_HANDLE pal_handle = thread_create(clone_implementation_wrapper,
                                           &new_args);
     if (!pal_handle) {
-        ret = -PAL_ERRNO;
+        ret = -PAL_ERRNO();
         put_thread(new_args.thread);
         goto clone_thread_failed;
     }

@@ -1,18 +1,5 @@
-/* Copyright (C) 2014 Stony Brook University
-   This file is part of Graphene Library OS.
-
-   Graphene Library OS is free software: you can redistribute it and/or
-   modify it under the terms of the GNU Lesser General Public License
-   as published by the Free Software Foundation, either version 3 of the
-   License, or (at your option) any later version.
-
-   Graphene Library OS is distributed in the hope that it will be useful,
-   but WITHOUT ANY WARRANTY; without even the implied warranty of
-   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-   GNU Lesser General Public License for more details.
-
-   You should have received a copy of the GNU Lesser General Public License
-   along with this program.  If not, see <http://www.gnu.org/licenses/>.  */
+/* SPDX-License-Identifier: LGPL-3.0-or-later */
+/* Copyright (C) 2014 Stony Brook University */
 
 /*
  * shim_thread.c
@@ -542,7 +529,7 @@ BEGIN_CP_FUNC(signal_handles)
     struct shim_signal_handles* handles = (struct shim_signal_handles*)obj;
     struct shim_signal_handles* new_handles = NULL;
 
-    ptr_t off = GET_FROM_CP_MAP(obj);
+    size_t off = GET_FROM_CP_MAP(obj);
 
     if (!off) {
         off = ADD_CP_OFFSET(sizeof(struct shim_signal_handles));
@@ -589,7 +576,7 @@ BEGIN_CP_FUNC(thread)
     struct shim_thread * thread = (struct shim_thread *) obj;
     struct shim_thread * new_thread = NULL;
 
-    ptr_t off = GET_FROM_CP_MAP(obj);
+    size_t off = GET_FROM_CP_MAP(obj);
 
     if (!off) {
         off = ADD_CP_OFFSET(sizeof(struct shim_thread));
@@ -684,10 +671,10 @@ BEGIN_CP_FUNC(running_thread)
     struct shim_thread * new_thread = NULL;
 
     DO_CP(thread, thread, &new_thread);
-    ADD_CP_FUNC_ENTRY((ptr_t) new_thread - base);
+    ADD_CP_FUNC_ENTRY((uintptr_t)new_thread - base);
 
     if (thread->shim_tcb) {
-        ptr_t toff = ADD_CP_OFFSET(sizeof(shim_tcb_t));
+        size_t toff = ADD_CP_OFFSET(sizeof(shim_tcb_t));
         new_thread->shim_tcb = (void *)(base + toff);
         struct shim_tcb* new_tcb = new_thread->shim_tcb;
         memcpy(new_tcb, thread->shim_tcb, sizeof(*new_tcb));
@@ -749,7 +736,7 @@ BEGIN_RS_FUNC(running_thread)
     if (cur_thread) {
         PAL_HANDLE handle = DkThreadCreate(resume_wrapper, thread);
         if (!thread)
-            return -PAL_ERRNO;
+            return -PAL_ERRNO();
 
         thread->pal_handle = handle;
     } else {

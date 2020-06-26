@@ -1,18 +1,5 @@
-/* Copyright (C) 2014 Stony Brook University
-   This file is part of Graphene Library OS.
-
-   Graphene Library OS is free software: you can redistribute it and/or
-   modify it under the terms of the GNU Lesser General Public License
-   as published by the Free Software Foundation, either version 3 of the
-   License, or (at your option) any later version.
-
-   Graphene Library OS is distributed in the hope that it will be useful,
-   but WITHOUT ANY WARRANTY; without even the implied warranty of
-   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-   GNU Lesser General Public License for more details.
-
-   You should have received a copy of the GNU Lesser General Public License
-   along with this program.  If not, see <http://www.gnu.org/licenses/>.  */
+/* SPDX-License-Identifier: LGPL-3.0-or-later */
+/* Copyright (C) 2014 Stony Brook University */
 
 /*!
  * \file shim_init.c
@@ -166,7 +153,8 @@ unsigned long parse_int (const char * str)
 void * migrated_memory_start;
 void * migrated_memory_end;
 
-const char ** initial_envp __attribute_migratable;
+const char** migrated_argv __attribute_migratable;
+const char** migrated_envp __attribute_migratable;
 
 /* library_paths is populated with LD_PRELOAD entries once during LibOS
  * initialization and is used in __load_interp_object() to search for ELF
@@ -177,27 +165,16 @@ char ** library_paths = NULL;
 struct shim_lock __master_lock;
 bool lock_enabled;
 
-void update_fs_base (unsigned long fs_base)
-{
-    shim_tcb_t * shim_tcb = shim_get_tcb();
-    shim_tcb->context.fs_base = fs_base;
-    DkSegmentRegister(PAL_SEGMENT_FS, (PAL_PTR)fs_base);
-    assert(shim_tcb_check_canary());
-}
+void* allocate_stack(size_t size, size_t protect_size, bool user) {
+    void* stack = NULL;
 
-#define STACK_FLAGS     (MAP_PRIVATE|MAP_ANONYMOUS)
-
-void * allocate_stack (size_t size, size_t protect_size, bool user)
-{
     size = ALLOC_ALIGN_UP(size);
     protect_size = ALLOC_ALIGN_UP(protect_size);
 
-    /* preserve a non-readable, non-writable page below the user
-       stack to stop user program to clobber other vmas */
-    void * stack = NULL;
-    int flags = STACK_FLAGS|(user ? 0 : VMA_INTERNAL);
+    int flags = MAP_PRIVATE | MAP_ANONYMOUS | (user ? 0 : VMA_INTERNAL);
 
     if (user) {
+        /* reserve non-readable non-writable page below the user stack to catch stack overflows */
         int ret = bkeep_mmap_any_aslr(size + protect_size, PROT_NONE, flags, NULL, 0, "stack",
                                       &stack);
         if (ret < 0) {
@@ -220,103 +197,138 @@ void * allocate_stack (size_t size, size_t protect_size, bool user)
     }
 
     stack += protect_size;
-    // Ensure proper alignment for process' initial stack pointer value.
+    /* ensure proper alignment for process' initial stack */
     stack = ALIGN_UP_PTR(stack, 16);
-    DkVirtualMemoryProtect(stack, size, PAL_PROT_READ|PAL_PROT_WRITE);
+    DkVirtualMemoryProtect(stack, size, PAL_PROT_READ | PAL_PROT_WRITE);
 
-    if (bkeep_mprotect(stack, size, PROT_READ|PROT_WRITE, !!(flags & VMA_INTERNAL)) < 0)
+    if (bkeep_mprotect(stack, size, PROT_READ | PROT_WRITE, !!(flags & VMA_INTERNAL)) < 0)
         return NULL;
 
     debug("allocated stack at %p (size = %ld)\n", stack, size);
     return stack;
 }
 
-static int populate_user_stack (void * stack, size_t stack_size,
-                                elf_auxv_t ** auxpp, int ** argcpp,
-                                const char *** argvp, const char *** envpp)
-{
-    const int argc = **argcpp;
-    const char ** argv = *argvp, ** envp = *envpp;
-    const char ** new_argv = NULL, ** new_envp = NULL;
-    elf_auxv_t *new_auxp = NULL;
-    void * stack_bottom = stack;
-    void * stack_top = stack + stack_size;
+/* populate already-allocated stack with copied argv and envp and space for auxv;
+ * returns a pointer to first stack frame (starting with argc, then argv pointers, and so on)
+ * and a pointer inside first stack frame (with auxv[0], auxv[1], and so on) */
+static int populate_stack(void* stack, size_t stack_size, const char** argv, const char** envp,
+                          const char*** out_argp, elf_auxv_t** out_auxv) {
+    void* stack_low_addr  = stack;
+    void* stack_high_addr = stack + stack_size;
 
-#define ALLOCATE_TOP(size)      \
-    ({ if ((stack_top -= (size)) < stack_bottom) return -ENOMEM;    \
-       stack_top; })
+#define ALLOCATE_FROM_HIGH_ADDR(size)                    \
+    ({ if ((stack_high_addr -= (size)) < stack_low_addr) \
+           return -ENOMEM;                               \
+       stack_high_addr; })
 
-#define ALLOCATE_BOTTOM(size)   \
-    ({ if ((stack_bottom += (size)) > stack_top) return -ENOMEM;    \
-       stack_bottom - (size); })
+#define ALLOCATE_FROM_LOW_ADDR(size)                     \
+    ({ if ((stack_low_addr += (size)) > stack_high_addr) \
+           return -ENOMEM;                               \
+       stack_low_addr - (size); })
 
-    /* ld.so expects argc as long on stack, not int. */
-    long * argcp = ALLOCATE_BOTTOM(sizeof(long));
-    *argcp = **argcpp;
-
-    if (!argv) {
-        *(const char **) ALLOCATE_BOTTOM(sizeof(const char *)) = NULL;
-        goto copy_envp;
+    /* create stack layout as follows for ld.so:
+     *
+     *                 +-------------------+
+     * out_argp +--->  |  argc             | long
+     *                 |  ptr to argv[0]   | char*
+     *                 |  ptr to argv[1]   | char*
+     *                 |  ...              | char*
+     *                 |  NULL             | char*
+     *                 |  ptr to envp[0]   | char*
+     *                 |  ptr to envp[1]   | char*
+     *                 |  ...              | char*
+     *                 |  NULL             | char*
+     * out_auxv +--->  |  <space for auxv> |
+     *                 |  envp[0] string   |
+     *                 |  envp[1] string   |
+     *                 |  ...              |
+     *                 |  argv[0] string   |
+     *                 |  argv[1] string   |
+     *                 |  ...              |
+     *                 +-------------------+
+     */
+    size_t argc      = 0;
+    size_t argv_size = 0;
+    for (const char** a = argv; *a; a++) {
+        argv_size += strlen(*a) + 1;
+        argc++;
     }
 
-    new_argv = stack_bottom;
-    while (argv) {
-        /* Even though the SysV ABI does not specify the order of argv strings,
-           some applications (notably Node.js's libuv) assume the compact
-           encoding of argv where (1) all strings are located adjacently and
-           (2) in increasing order. */
-        int argv_size = 0;
-        for (const char ** a = argv ; *a ; a++)
-            argv_size += strlen(*a) + 1;
-        char * argv_bottom = ALLOCATE_TOP(argv_size);
+    /* we populate the stack memory region from two ends:
+     *   - memory at high addresses contains buffers with argv + envp strings
+     *   - memory at low addresses contains argc and pointer-arrays of argv, envp, and auxv */
+    long* argc_ptr = ALLOCATE_FROM_LOW_ADDR(sizeof(long));
+    *argc_ptr = argc;
 
-        for (const char ** a = argv ; *a ; a++) {
-            const char ** t = ALLOCATE_BOTTOM(sizeof(const char *));
-            int len = strlen(*a) + 1;
-            char * abuf = argv_bottom;
-            argv_bottom += len;
-            memcpy(abuf, *a, len);
-            *t = abuf;
-        }
+    /* pre-allocate enough space to hold all argv strings */
+    char* argv_str = ALLOCATE_FROM_HIGH_ADDR(argv_size);
 
-        *((const char **) ALLOCATE_BOTTOM(sizeof(const char *))) = NULL;
-copy_envp:
-        if (!envp)
-            break;
-        new_envp = stack_bottom;
-        argv = envp;
-        envp = NULL;
+    /* Even though the SysV ABI does not specify the order of argv strings, some applications
+     * (notably Node.js's libuv) assume the compact encoding of argv where (1) all strings are
+     * located adjacently and (2) in increasing order. */
+    const char** new_argv = stack_low_addr;
+    for (const char** a = argv; *a; a++) {
+        size_t len = strlen(*a) + 1;
+        const char** argv_ptr = ALLOCATE_FROM_LOW_ADDR(sizeof(const char*)); /* ptr to argv[i] */
+        memcpy(argv_str, *a, len);                                           /* argv[i] string */
+        *argv_ptr = argv_str;
+        argv_str += len;
     }
+    *((const char**)ALLOCATE_FROM_LOW_ADDR(sizeof(const char*))) = NULL;
 
-    if (!new_envp)
-        *(const char **) ALLOCATE_BOTTOM(sizeof(const char *)) = NULL;
+    /* populate envp on stack similarly to argv */
+    size_t envp_size = 0;
+    for (const char** e = envp; *e; e++) {
+        envp_size += strlen(*e) + 1;
+    }
+    char* envp_str = ALLOCATE_FROM_HIGH_ADDR(envp_size);
 
-    /* reserve space for ELF aux vectors, populated later by LibOS */
-    new_auxp = ALLOCATE_BOTTOM(REQUIRED_ELF_AUXV * sizeof(elf_auxv_t) +
-                               REQUIRED_ELF_AUXV_SPACE);
+    const char** new_envp = stack_low_addr;
+    for (const char** e = envp; *e; e++) {
+        size_t len = strlen(*e) + 1;
+        const char** envp_ptr = ALLOCATE_FROM_LOW_ADDR(sizeof(const char*)); /* ptr to envp[i] */
+        memcpy(envp_str, *e, len);                                           /* envp[i] string */
+        *envp_ptr = envp_str;
+        envp_str += len;
+    }
+    *((const char**)ALLOCATE_FROM_LOW_ADDR(sizeof(const char*))) = NULL;
 
-    /* x86_64 ABI requires 16 bytes alignment on stack on every function
-       call. */
-    size_t move_size = stack_bottom - stack;
-    *argcpp = stack_top - move_size;
-    *argcpp = ALIGN_DOWN_PTR(*argcpp, 16UL);
-    **argcpp = argc;
-    size_t shift = (void*)(*argcpp) - stack;
+    /* reserve space for ELF aux vectors, populated later in execute_elf_object() */
+    elf_auxv_t* new_auxv = ALLOCATE_FROM_LOW_ADDR(REQUIRED_ELF_AUXV * sizeof(elf_auxv_t) +
+                                                  REQUIRED_ELF_AUXV_SPACE);
 
-    memmove(*argcpp, stack, move_size);
-    *argvp = new_argv ? (void *) new_argv + shift : NULL;
-    *envpp = new_envp ? (void *) new_envp + shift : NULL;
-    *auxpp = new_auxp ? (void *) new_auxp + shift : NULL;
+    /* we have now low part of stack (with argc and pointer-arrays of argv, envp, auxv), high part
+     * of stack (with argv and envp strings) and an empty space in the middle: we must remove the
+     * empty middle by moving the low part of stack adjacent to the high part */
+    size_t move_size         = stack_low_addr - stack;
+    void* new_stack_low_addr = stack_high_addr - move_size;
+
+    /* x86-64 SysV ABI requires 16B alignment of stack on ELF entrypoint */
+    new_stack_low_addr = ALIGN_DOWN_PTR(new_stack_low_addr, 16UL);
+    memmove(new_stack_low_addr, stack, move_size);
+
+    /* pointer-arrays of argv, envp, and auxv were allocated on low part of stack and shifted via
+     * memmove above, need to shift pointers to their bases */
+    size_t shift = new_stack_low_addr - stack;
+    new_argv = (void*)new_argv + shift;
+    new_envp = (void*)new_envp + shift;
+    new_auxv = (void*)new_auxv + shift;
 
     /* clear working area at the bottom */
     memset(stack, 0, shift);
+
+    /* set global envp pointer for future checkpoint/migration: this is required for fork/clone
+     * case (so that migrated envp points to envvars on the migrated stack) and redundant for
+     * execve case (because execve passes an explicit list of envvars to child process) */
+    migrated_envp = new_envp;
+
+    *out_argp = new_stack_low_addr;
+    *out_auxv = new_auxv;
     return 0;
 }
 
-int init_stack (const char ** argv, const char ** envp,
-                int ** argcpp, const char *** argpp,
-                elf_auxv_t ** auxpp)
-{
+int init_stack(const char** argv, const char** envp, const char*** out_argp,
+               elf_auxv_t** out_auxv) {
     uint64_t stack_size = get_rlimit_cur(RLIMIT_STACK);
 
     if (root_config) {
@@ -327,30 +339,25 @@ int init_stack (const char ** argv, const char ** envp,
         }
     }
 
-    struct shim_thread * cur_thread = get_cur_thread();
-
+    struct shim_thread* cur_thread = get_cur_thread();
     if (!cur_thread || cur_thread->stack)
         return 0;
 
-    void * stack = allocate_stack(stack_size, g_pal_alloc_align, true);
+    void* stack = allocate_stack(stack_size, g_pal_alloc_align, /*user=*/true);
     if (!stack)
         return -ENOMEM;
 
-    if (initial_envp)
-        envp = initial_envp;
+    /* if there are argv/envp inherited from parent, use them */
+    argv = migrated_argv ? : argv;
+    envp = migrated_envp ? : envp;
 
-    int ret = populate_user_stack(stack, stack_size,
-                                  auxpp, argcpp, &argv, &envp);
+    int ret = populate_stack(stack, stack_size, argv, envp, out_argp, out_auxv);
     if (ret < 0)
         return ret;
-
-    *argpp = argv;
-    initial_envp = envp;
 
     cur_thread->stack_top = stack + stack_size;
     cur_thread->stack     = stack;
     cur_thread->stack_red = stack - g_pal_alloc_align;
-
     return 0;
 }
 
@@ -423,7 +430,7 @@ int init_manifest (PAL_HANDLE manifest_handle) {
     } else {
         PAL_STREAM_ATTR attr;
         if (!DkStreamAttributesQueryByHandle(manifest_handle, &attr))
-            return -PAL_ERRNO;
+            return -PAL_ERRNO();
 
         size = attr.pending_size;
         map_size = ALLOC_ALIGN_UP(size);
@@ -480,27 +487,6 @@ fail:
     return ret;
 }
 
-# define FIND_ARG_COMPONENTS(cookie, argc, argv, envp, auxp)        \
-    do {                                                            \
-        void *_tmp = (cookie);                                      \
-        (argv) = _tmp;                                              \
-        _tmp += sizeof(char *) * ((argc) + 1);                      \
-        (envp) = _tmp;                                              \
-        for ( ; *(char **) _tmp; _tmp += sizeof(char *));           \
-        (auxp) = _tmp + sizeof(char *);                             \
-    } while (0)
-
-static int init_newproc (struct newproc_header * hdr)
-{
-    PAL_NUM bytes = DkStreamRead(PAL_CB(parent_process), 0,
-                                 sizeof(struct newproc_header), hdr,
-                                 NULL, 0);
-    if (bytes == PAL_STREAM_ERROR)
-        return -PAL_ERRNO;
-
-    return hdr->failure;
-}
-
 #define CALL_INIT(func, args ...)   func(args)
 
 #define RUN_INIT(func, ...)                                             \
@@ -514,8 +500,7 @@ static int init_newproc (struct newproc_header * hdr)
 
 extern PAL_HANDLE thread_start_event;
 
-noreturn void* shim_init(int argc, void* args)
-{
+noreturn void* shim_init(int argc, void* args) {
     debug_handle = PAL_CB(debug_stream);
     cur_process.vmid = (IDTYPE) PAL_CB(process_id);
 
@@ -541,15 +526,8 @@ noreturn void* shim_init(int argc, void* args)
         shim_clean_and_exit(-ENOMEM);
     }
 
-    int * argcp = &argc;
-    const char ** argv, ** envp, ** argp = NULL;
-    elf_auxv_t * auxp;
-
-    /* call to figure out where the arguments are */
-    FIND_ARG_COMPONENTS(args, argc, argv, envp, auxp);
-
-    struct newproc_header hdr;
-    void * cpaddr = NULL;
+    const char** argv = args;
+    const char** envp = args + sizeof(char*) * ((argc) + 1);
 
     RUN_INIT(init_vma);
     RUN_INIT(init_slab);
@@ -563,17 +541,17 @@ noreturn void* shim_init(int argc, void* args)
 
     debug("shim loaded at %p, ready to initialize\n", &__load_address);
 
-    if (!cpaddr && PAL_CB(parent_process)) {
-        RUN_INIT(init_newproc, &hdr);
-        if (hdr.checkpoint.hdr.size)
-            RUN_INIT(do_migration, &hdr.checkpoint, &cpaddr);
-    }
+    if (PAL_CB(parent_process)) {
+        struct checkpoint_hdr hdr;
 
-    if (cpaddr) {
+        PAL_NUM ret = DkStreamRead(PAL_CB(parent_process), 0, sizeof(hdr), &hdr, NULL, 0);
+        if (ret == PAL_STREAM_ERROR || ret != sizeof(hdr))
+            shim_do_exit(-PAL_ERRNO());
+
         thread_start_event = DkNotificationEventCreate(PAL_FALSE);
-        RUN_INIT(restore_checkpoint,
-                 &hdr.checkpoint.hdr, &hdr.checkpoint.mem,
-                 (ptr_t) cpaddr, 0);
+
+        assert(hdr.size);
+        RUN_INIT(receive_checkpoint_and_restore, &hdr);
     }
 
     if (PAL_CB(manifest_handle))
@@ -585,30 +563,32 @@ noreturn void* shim_init(int argc, void* args)
     RUN_INIT(init_mount);
     RUN_INIT(init_important_handles);
     RUN_INIT(init_async);
-    RUN_INIT(init_stack, argv, envp, &argcp, &argp, &auxp);
+
+    const char** new_argp;
+    elf_auxv_t* new_auxv;
+    RUN_INIT(init_stack, argv, envp, &new_argp, &new_auxv);
+
     RUN_INIT(init_loader);
     RUN_INIT(init_ipc_helper);
     RUN_INIT(init_signal);
 
     if (PAL_CB(parent_process)) {
         /* Notify the parent process */
-        struct newproc_response res;
-        res.child_vmid = cur_process.vmid;
-        res.failure = 0;
-        PAL_NUM ret = DkStreamWrite(PAL_CB(parent_process), 0,
-                                    sizeof(struct newproc_response),
-                                    &res, NULL);
-        if (ret == PAL_STREAM_ERROR)
-            shim_do_exit(-PAL_ERRNO);
+        IDTYPE child_vmid = cur_process.vmid;
+        PAL_NUM ret = DkStreamWrite(PAL_CB(parent_process), 0, sizeof(child_vmid), &child_vmid,
+                                    NULL);
+        if (ret == PAL_STREAM_ERROR || ret != sizeof(child_vmid))
+            shim_do_exit(-PAL_ERRNO());
 
+        /* FIXME: We shouldn't downgrade communication */
         /* Downgrade communication with parent to non-secure (only checkpoint recv is secure).
          * Currently only relevant to SGX PAL, other PALs ignore this. */
         PAL_STREAM_ATTR attr;
         if (!DkStreamAttributesQueryByHandle(PAL_CB(parent_process), &attr))
-            shim_do_exit(-PAL_ERRNO);
+            shim_do_exit(-PAL_ERRNO());
         attr.secure = PAL_FALSE;
         if (!DkStreamAttributesSetByHandle(PAL_CB(parent_process), &attr))
-            shim_do_exit(-PAL_ERRNO);
+            shim_do_exit(-PAL_ERRNO());
     }
 
     debug("shim process initialized\n");
@@ -625,7 +605,7 @@ noreturn void* shim_init(int argc, void* args)
     }
 
     if (cur_thread->exec)
-        execute_elf_object(cur_thread->exec, argcp, argp, auxp);
+        execute_elf_object(cur_thread->exec, new_argp, new_auxv);
     shim_do_exit(0);
 }
 
@@ -704,7 +684,7 @@ static int open_pipe(const char* uri, void* obj) {
 
     PAL_HANDLE pipe = DkStreamOpen(uri, 0, 0, 0, 0);
     if (!pipe)
-        return PAL_NATIVE_ERRNO == PAL_ERROR_STREAMEXIST ? 1 : -PAL_ERRNO;
+        return PAL_NATIVE_ERRNO() == PAL_ERROR_STREAMEXIST ? 1 : -PAL_ERRNO();
 
     PAL_HANDLE* pal_hdl = (PAL_HANDLE*)obj;
     *pal_hdl = pipe;
@@ -807,10 +787,10 @@ static int open_pal_handle (const char * uri, void * obj)
                            0);
 
     if (!hdl) {
-        if (PAL_NATIVE_ERRNO == PAL_ERROR_STREAMEXIST)
+        if (PAL_NATIVE_ERRNO() == PAL_ERROR_STREAMEXIST)
             return 0;
         else
-            return -PAL_ERRNO;
+            return -PAL_ERRNO();
     }
 
     if (obj) {
@@ -883,23 +863,6 @@ int create_handle (const char * prefix, char * uri, size_t size,
                          id ? : &suffix, hdl, NULL);
 }
 
-void check_stack_hook (void)
-{
-    struct shim_thread * cur_thread = get_cur_thread();
-
-    void * rsp;
-    __asm__ volatile ("movq %%rsp, %0" : "=r"(rsp) :: "memory");
-
-    if (rsp <= cur_thread->stack_top && rsp > cur_thread->stack) {
-        if ((uintptr_t)rsp - (uintptr_t)cur_thread->stack < PAL_CB(alloc_align))
-            SYS_PRINTF("*** stack is almost drained (RSP = %p, stack = %p-%p) ***\n",
-                       rsp, cur_thread->stack, cur_thread->stack_top);
-    } else {
-        SYS_PRINTF("*** context dismatched with thread stack (RSP = %p, stack = %p-%p) ***\n",
-                   rsp, cur_thread->stack, cur_thread->stack_top);
-    }
-}
-
 noreturn void shim_clean_and_exit(int exit_code) {
     static int in_terminate = 0;
     if (__atomic_add_fetch(&in_terminate, 1, __ATOMIC_RELAXED) > 1) {
@@ -955,17 +918,17 @@ int message_confirm (const char * message, const char * options)
     PAL_NUM pal_ret;
     pal_ret = DkStreamWrite(hdl, 0, strlen(message), (void*)message, NULL);
     if (pal_ret == PAL_STREAM_ERROR) {
-        ret = -PAL_ERRNO;
+        ret = -PAL_ERRNO();
         goto out;
     }
     pal_ret = DkStreamWrite(hdl, 0, noptions * 2 + 3, option_str, NULL);
     if (pal_ret == PAL_STREAM_ERROR) {
-        ret = -PAL_ERRNO;
+        ret = -PAL_ERRNO();
         goto out;
     }
     pal_ret = DkStreamRead(hdl, 0, 1, &answer, NULL, 0);
     if (pal_ret == PAL_STREAM_ERROR) {
-        ret = -PAL_ERRNO;
+        ret = -PAL_ERRNO();
         goto out;
     }
 

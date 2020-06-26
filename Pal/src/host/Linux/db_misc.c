@@ -1,18 +1,5 @@
-/* Copyright (C) 2014 Stony Brook University
-   This file is part of Graphene Library OS.
-
-   Graphene Library OS is free software: you can redistribute it and/or
-   modify it under the terms of the GNU Lesser General Public License
-   as published by the Free Software Foundation, either version 3 of the
-   License, or (at your option) any later version.
-
-   Graphene Library OS is distributed in the hope that it will be useful,
-   but WITHOUT ANY WARRANTY; without even the implied warranty of
-   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-   GNU Lesser General Public License for more details.
-
-   You should have received a copy of the GNU Lesser General Public License
-   along with this program.  If not, see <http://www.gnu.org/licenses/>.  */
+/* SPDX-License-Identifier: LGPL-3.0-or-later */
+/* Copyright (C) 2014 Stony Brook University */
 
 /*
  * db_misc.c
@@ -110,25 +97,7 @@ unsigned long _DkSystemTimeQuery(void) {
 #endif
 }
 
-#if USE_ARCH_RDRAND == 1
-int _DkRandomBitsRead(void* buffer, int size) {
-    int total_bytes = 0;
-    do {
-        unsigned long rand;
-        asm volatile(".Lretry: rdrand %%rax\r\n jnc .Lretry\r\n" : "=a"(rand)::"memory", "cc");
-
-        if (total_bytes + sizeof(rand) <= size) {
-            *(unsigned long*)(buffer + total_bytes) = rand;
-            total_bytes += sizeof(rand);
-        } else {
-            for (int i = 0; i < size - total_bytes; i++)
-                *(unsigned char*)(buffer + total_bytes + i) = ((unsigned char*)&rand)[i];
-            total_bytes = size;
-        }
-    } while (total_bytes < size);
-    return 0;
-}
-#else
+#if USE_ARCH_RD_RAND != 1
 size_t _DkRandomBitsRead(void* buffer, size_t size) {
     if (!pal_sec.random_device) {
         int fd = INLINE_SYSCALL(open, 3, RANDGEN_DEVICE, O_RDONLY, 0);
@@ -152,88 +121,11 @@ size_t _DkRandomBitsRead(void* buffer, size_t size) {
 }
 #endif
 
-#if defined(__i386__)
-#include <asm/ldt.h>
-#elif defined(__x86_64__)
-#include <asm/prctl.h>
-#endif
-
-int _DkSegmentRegisterSet(int reg, const void* addr) {
-    int ret = 0;
-
-#if defined(__i386__)
-    struct user_desc u_info;
-
-    ret = INLINE_SYSCALL(get_thread_area, 1, &u_info);
-
-    if (IS_ERR(ret))
-        return NULL;
-
-    u_info->entry_number = -1;
-    u_info->base_addr    = (unsigned int)addr;
-
-    ret = INLINE_SYSCALL(set_thread_area, 1, &u_info);
-#elif defined(__x86_64__)
-    if (reg == PAL_SEGMENT_FS) {
-        ret = INLINE_SYSCALL(arch_prctl, 2, ARCH_SET_FS, addr);
-    } else if (reg == PAL_SEGMENT_GS) {
-        return -PAL_ERROR_DENIED;
-    } else {
-        return -PAL_ERROR_INVAL;
-    }
-#else
-#error Unsupported architecture
-#endif
-    if (IS_ERR(ret))
-        return -PAL_ERROR_DENIED;
-
-    return 0;
-}
-
-int _DkSegmentRegisterGet(int reg, void** addr) {
-    int ret;
-
-#if defined(__i386__)
-    struct user_desc u_info;
-
-    ret = INLINE_SYSCALL(get_thread_area, 1, &u_info);
-
-    if (IS_ERR(ret))
-        return -PAL_ERROR_DENIED;
-
-    *addr = (void*)u_info->base_addr;
-#elif defined(__x86_64__)
-    unsigned long ret_addr;
-
-    if (reg == PAL_SEGMENT_FS) {
-        ret = INLINE_SYSCALL(arch_prctl, 2, ARCH_GET_FS, &ret_addr);
-    } else if (reg == PAL_SEGMENT_GS) {
-        // The GS segment is used for the internal TCB of PAL
-        return -PAL_ERROR_DENIED;
-    } else {
-        return -PAL_ERROR_INVAL;
-    }
-
-    if (IS_ERR(ret))
-        return -PAL_ERROR_DENIED;
-
-    *addr = (void*)ret_addr;
-#else
-#error Unsupported architecture
-#endif
-    return 0;
-}
-
 int _DkInstructionCacheFlush(const void* addr, int size) {
     __UNUSED(addr);
     __UNUSED(size);
 
     return -PAL_ERROR_NOTIMPLEMENTED;
-}
-
-int _DkCpuIdRetrieve(unsigned int leaf, unsigned int subleaf, unsigned int values[4]) {
-    cpuid(leaf, subleaf, values);
-    return 0;
 }
 
 int _DkAttestationReport(PAL_PTR user_report_data, PAL_NUM* user_report_data_size,

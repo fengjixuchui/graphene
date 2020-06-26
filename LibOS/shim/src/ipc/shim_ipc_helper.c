@@ -1,18 +1,5 @@
-/* Copyright (C) 2014 Stony Brook University
-   This file is part of Graphene Library OS.
-
-   Graphene Library OS is free software: you can redistribute it and/or
-   modify it under the terms of the GNU Lesser General Public License
-   as published by the Free Software Foundation, either version 3 of the
-   License, or (at your option) any later version.
-
-   Graphene Library OS is distributed in the hope that it will be useful,
-   but WITHOUT ANY WARRANTY; without even the implied warranty of
-   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-   GNU Lesser General Public License for more details.
-
-   You should have received a copy of the GNU Lesser General Public License
-   along with this program.  If not, see <http://www.gnu.org/licenses/>.  */
+/* SPDX-License-Identifier: LGPL-3.0-or-later */
+/* Copyright (C) 2014 Stony Brook University */
 
 /*
  * shim_ipc_helper.c
@@ -156,7 +143,7 @@ static int init_ns_ipc_port(int ns_idx) {
             DkStreamOpen(qstrgetstr(&cur_process.ns[ns_idx]->uri), 0, 0, 0, 0);
         if (!cur_process.ns[ns_idx]->pal_handle) {
             unlock(&cur_process.lock);
-            return -PAL_ERRNO;
+            return -PAL_ERRNO();
         }
     }
 
@@ -583,13 +570,13 @@ static int receive_ipc_message(struct shim_ipc_port* port) {
                              (void*)msg + bytes, NULL, 0);
 
             if (read == PAL_STREAM_ERROR) {
-                if (PAL_ERRNO == EINTR || PAL_ERRNO == EAGAIN || PAL_ERRNO == EWOULDBLOCK)
+                if (PAL_ERRNO() == EINTR || PAL_ERRNO() == EAGAIN || PAL_ERRNO() == EWOULDBLOCK)
                     continue;
 
                 debug("Port %p (handle %p) closed while receiving IPC message\n", port,
                       port->pal_handle);
                 del_ipc_port_fini(port, -ECHILD);
-                ret = -PAL_ERRNO;
+                ret = -PAL_ERRNO();
                 goto out;
             }
 
@@ -617,7 +604,7 @@ static int receive_ipc_message(struct shim_ipc_port* port) {
                     if (ret < 0) {
                         debug("Sending IPC_RESP msg on port %p (handle %p) to %u failed\n", port,
                               port->pal_handle, msg->src & 0xFFFF);
-                        ret = -PAL_ERRNO;
+                        ret = -PAL_ERRNO();
                         goto out;
                     }
                 }
@@ -806,7 +793,7 @@ noreturn static void shim_ipc_helper(void* dummy) {
                     } else {
                         debug("Port %p (handle %p) was removed during attr querying\n",
                               polled_port, polled_port->pal_handle);
-                        del_ipc_port_fini(polled_port, -PAL_ERRNO);
+                        del_ipc_port_fini(polled_port, -PAL_ERRNO());
                     }
                 }
             }
@@ -826,6 +813,7 @@ noreturn static void shim_ipc_helper(void* dummy) {
     debug("IPC helper thread terminated\n");
 
     DkThreadExit(/*clear_child_tid=*/NULL);
+    /* UNREACHABLE */
 
 out_err_unlock:
     unlock(&ipc_helper_lock);
@@ -855,7 +843,7 @@ static void shim_ipc_helper_prepare(void* arg) {
         free(stack);
         put_thread(self);
         DkThreadExit(/*clear_child_tid=*/NULL);
-        return;
+        /* UNREACHABLE */
     }
 
     debug("IPC helper thread started\n");
@@ -883,7 +871,7 @@ static int create_ipc_helper(void) {
     PAL_HANDLE handle = thread_create(shim_ipc_helper_prepare, new);
 
     if (!handle) {
-        int ret = -PAL_ERRNO;  /* put_thread() may overwrite errno */
+        int ret = -PAL_ERRNO();  /* put_thread() may overwrite errno */
         ipc_helper_thread = NULL;
         ipc_helper_state  = HELPER_NOTALIVE;
         put_thread(new);

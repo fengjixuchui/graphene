@@ -1,18 +1,5 @@
-/* Copyright (C) 2014 Stony Brook University
-   This file is part of Graphene Library OS.
-
-   Graphene Library OS is free software: you can redistribute it and/or
-   modify it under the terms of the GNU Lesser General Public License
-   as published by the Free Software Foundation, either version 3 of the
-   License, or (at your option) any later version.
-
-   Graphene Library OS is distributed in the hope that it will be useful,
-   but WITHOUT ANY WARRANTY; without even the implied warranty of
-   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-   GNU Lesser General Public License for more details.
-
-   You should have received a copy of the GNU Lesser General Public License
-   along with this program.  If not, see <http://www.gnu.org/licenses/>.  */
+/* SPDX-License-Identifier: LGPL-3.0-or-later */
+/* Copyright (C) 2014 Stony Brook University */
 
 /*
  * shim_internal.h
@@ -51,7 +38,7 @@ static inline unsigned int get_cur_tid(void) {
     return SHIM_TCB_GET(tid);
 }
 
-#define PAL_NATIVE_ERRNO        (SHIM_TCB_GET(pal_errno))
+#define PAL_NATIVE_ERRNO()      SHIM_TCB_GET(pal_errno)
 
 #define INTERNAL_TID_BASE       ((IDTYPE) 1 << (sizeof(IDTYPE) * 8 - 1))
 
@@ -166,15 +153,13 @@ static inline PAL_HANDLE __open_shim_stdio (void)
 
 /* definition for syscall table */
 void handle_signals(void);
-long convert_pal_errno (long err);
+long convert_pal_errno(long err);
 void syscall_wrapper(void);
 void syscall_wrapper_after_syscalldb(void);
 
-#define PAL_ERRNO  convert_pal_errno(PAL_NATIVE_ERRNO)
+#define PAL_ERRNO() convert_pal_errno(PAL_NATIVE_ERRNO())
 
 #define SHIM_ARG_TYPE long
-
-void check_stack_hook (void);
 
 static inline int64_t get_cur_preempt (void) {
     shim_tcb_t* tcb = shim_get_tcb();
@@ -186,8 +171,7 @@ static inline int64_t get_cur_preempt (void) {
     SHIM_ARG_TYPE __shim_##name(args) {                     \
         SHIM_ARG_TYPE ret = 0;                              \
         int64_t preempt = get_cur_preempt();                \
-        __UNUSED(preempt);                                  \
-        /* check_stack_hook(); */
+        __UNUSED(preempt);
 
 #define END_SHIM(name)                                      \
         handle_signals();                                   \
@@ -718,8 +702,8 @@ extern void * __code_address, * __code_address_end;
 
 unsigned long parse_int (const char * str);
 
-extern void * initial_stack;
-extern const char ** initial_envp;
+extern const char** migrated_argv;
+extern const char** migrated_envp;
 
 struct shim_handle;
 int init_brk_from_executable (struct shim_handle * exec);

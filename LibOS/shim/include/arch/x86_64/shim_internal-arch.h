@@ -1,18 +1,4 @@
-/*
-   This file is part of Graphene Library OS.
-
-   Graphene Library OS is free software: you can redistribute it and/or
-   modify it under the terms of the GNU Lesser General Public License
-   as published by the Free Software Foundation, either version 3 of the
-   License, or (at your option) any later version.
-
-   Graphene Library OS is distributed in the hope that it will be useful,
-   but WITHOUT ANY WARRANTY; without even the implied warranty of
-   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-   GNU Lesser General Public License for more details.
-
-   You should have received a copy of the GNU Lesser General Public License
-   along with this program.  If not, see <http://www.gnu.org/licenses/>.  */
+/* SPDX-License-Identifier: LGPL-3.0-or-later */
 
 /*
  * shim_internal-arch.h
@@ -39,5 +25,15 @@ static_always_inline void* current_stack(void) {
     __asm__ volatile ("movq %%rsp, %0" : "=r"(_rsp) :: "memory");
     return _rsp;
 }
+
+#define CALL_ELF_ENTRY(ENTRY, ARGP)      \
+    __asm__ volatile(                    \
+        "pushq $0\r\n"                   \
+        "popfq\r\n"                      \
+        "movq %%rbx, %%rsp\r\n"          \
+        "jmp *%%rax\r\n"                 \
+        :                                \
+        : "a"(ENTRY), "b"(ARGP), "d"(0)  \
+        : "memory", "cc")
 
 #endif /* _SHIM_INTERNAL_ARCH_H_ */

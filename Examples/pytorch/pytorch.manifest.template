@@ -7,13 +7,16 @@
 # ./pal_loader pytorch.manifest pytorchexample.py
 
 # The executable to load in Graphene
-loader.exec     = file:/usr/bin/python3
-loader.execname = python3
+loader.exec = file:/usr/bin/python3
+loader.argv0_override = python3
 
 # Graphene environment, including the path to the library OS and the debug
 # option (inline/none)
 loader.preload = file:$(GRAPHENEDIR)/Runtime/libsysdb.so
 loader.debug_type = $(GRAPHENEDEBUG)
+
+# Read application arguments directly from the command line. Don't use this on production!
+loader.insecure__use_cmdline_argv = 1
 
 # Environment variables
 loader.env.LD_LIBRARY_PATH = /lib:/usr/lib:$(ARCH_LIBDIR):/usr/$(ARCH_LIBDIR)

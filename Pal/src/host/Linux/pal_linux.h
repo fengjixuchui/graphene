@@ -1,18 +1,5 @@
-/* Copyright (C) 2014 Stony Brook University
-   This file is part of Graphene Library OS.
-
-   Graphene Library OS is free software: you can redistribute it and/or
-   modify it under the terms of the GNU Lesser General Public License
-   as published by the Free Software Foundation, either version 3 of the
-   License, or (at your option) any later version.
-
-   Graphene Library OS is distributed in the hope that it will be useful,
-   but WITHOUT ANY WARRANTY; without even the implied warranty of
-   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-   GNU Lesser General Public License for more details.
-
-   You should have received a copy of the GNU Lesser General Public License
-   along with this program.  If not, see <http://www.gnu.org/licenses/>.  */
+/* SPDX-License-Identifier: LGPL-3.0-or-later */
+/* Copyright (C) 2014 Stony Brook University */
 
 #ifndef PAL_LINUX_H
 #define PAL_LINUX_H
@@ -144,6 +131,9 @@ bool stataccess (struct stat * stats, int acc);
 
 void init_child_process(int parent_pipe_fd, PAL_HANDLE* parent, PAL_HANDLE* exec,
                         PAL_HANDLE* manifest);
+
+int get_cpu_count(void);
+ssize_t read_file_buffer(const char* filename, char* buf, size_t buf_size);
 
 void cpuid (unsigned int leaf, unsigned int subleaf,
             unsigned int words[]);

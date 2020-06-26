@@ -135,8 +135,6 @@ void put_signal_handles(struct shim_signal_handles* handles);
 void get_thread (struct shim_thread * thread);
 void put_thread (struct shim_thread * thread);
 
-void update_fs_base (unsigned long fs_base);
-
 void debug_setprefix (shim_tcb_t * tcb);
 
 static inline
@@ -213,7 +211,7 @@ static inline int thread_sleep (uint64_t timeout_us)
         return -EINVAL;
 
     if (!DkSynchronizationObjectWait(event, timeout_us))
-        return -PAL_ERRNO;
+        return -PAL_ERRNO();
 
     return 0;
 }
@@ -361,8 +359,7 @@ bool check_on_stack (struct shim_thread * cur_thread, void * mem)
     return (mem <= cur_thread->stack_top && mem > cur_thread->stack);
 }
 
-int init_stack (const char ** argv, const char ** envp,
-                int ** argcpp, const char *** argpp,
-                elf_auxv_t ** auxpp);
+int init_stack(const char** argv, const char** envp, const char*** out_argp,
+               elf_auxv_t** out_auxv);
 
 #endif /* _SHIM_THREAD_H_ */
