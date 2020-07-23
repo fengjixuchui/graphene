@@ -15,8 +15,14 @@
 
 PAL_NUM DkSystemTimeQuery(void) {
     ENTER_PAL_CALL(DkSystemTimeQuery);
-    unsigned long time = _DkSystemTimeQuery();
-    return time;
+    uint64_t time;
+    int ret = _DkSystemTimeQuery(&time);
+    if (ret < 0) {
+        _DkRaiseFailure(-ret);
+        // TODO: Fix this interface to allow returning errors.
+        time = 0;
+    }
+    LEAVE_PAL_CALL_RETURN(time);
 }
 
 PAL_NUM DkRandomBitsRead(PAL_PTR buffer, PAL_NUM size) {
@@ -114,6 +120,17 @@ PAL_BOL DkAttestationQuote(PAL_PTR user_report_data, PAL_NUM user_report_data_si
     ENTER_PAL_CALL(DkAttestationQuote);
 
     int ret = _DkAttestationQuote(user_report_data, user_report_data_size, quote, quote_size);
+    if (ret < 0) {
+        _DkRaiseFailure(-ret);
+        LEAVE_PAL_CALL_RETURN(PAL_FALSE);
+    }
+    LEAVE_PAL_CALL_RETURN(PAL_TRUE);
+}
+
+PAL_BOL DkSetProtectedFilesKey(PAL_PTR pf_key_hex) {
+    ENTER_PAL_CALL(DkSetProtectedFilesKey);
+
+    int ret = _DkSetProtectedFilesKey(pf_key_hex);
     if (ret < 0) {
         _DkRaiseFailure(-ret);
         LEAVE_PAL_CALL_RETURN(PAL_FALSE);

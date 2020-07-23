@@ -7,6 +7,7 @@ import subprocess
 
 from regression import (
     HAS_SGX,
+    ON_X86,
     RegressionTestCase,
 )
 
@@ -24,13 +25,13 @@ class TC_01_Bootstrap(RegressionTestCase):
         self.assertIn('User Program Started', stdout)
 
         # One Argument Given
-        self.assertIn('# of Arguments: 1', stdout)
+        self.assertIn('# of arguments: 1', stdout)
         self.assertIn('argv[0] = bootstrap', stdout)
 
     def test_101_basic_bootstrapping_five_arguments(self):
         # Five Arguments Given
         stdout, _ = self.run_binary(['bootstrap', 'a', 'b', 'c', 'd'])
-        self.assertIn('# of Arguments: 5', stdout)
+        self.assertIn('# of arguments: 5', stdout)
         self.assertIn('argv[0] = bootstrap', stdout)
         self.assertIn('argv[1] = a', stdout)
         self.assertIn('argv[2] = b', stdout)
@@ -46,22 +47,54 @@ class TC_01_Bootstrap(RegressionTestCase):
         try:
             manifest = self.get_manifest('argv_from_file')
             stdout, _ = self.run_binary([manifest, 'WRONG', 'ARGUMENTS'])
-            self.assertIn('# of Arguments: %d' % len(args), stdout)
+            self.assertIn('# of arguments: %d\n' % len(args), stdout)
             for i, arg in enumerate(args):
-                self.assertIn('argv[%d] = %s' % (i, arg), stdout)
+                self.assertIn('argv[%d] = %s\n' % (i, arg), stdout)
         finally:
             os.remove('argv_test_input')
+
+    def test_103_env_from_host(self):
+        host_envs = {
+            'A': '123',
+            'PWD': '/some_dir',
+            'some weir:d\nvar_name': ' even we\nirder\tvalue',
+        }
+        manifest_envs = {'LD_LIBRARY_PATH': '/lib'}
+        manifest = self.get_manifest('env_from_host')
+        stdout, _ = self.run_binary([manifest], env=host_envs)
+        self.assertIn('# of envs: %d\n' % (len(host_envs) + len(manifest_envs)), stdout)
+        for i, (key, val) in enumerate({**host_envs, **manifest_envs}.items()):
+            # We don't enforce any specific order of envs, so we skip checking the index.
+            self.assertIn('] = %s\n' % (key + '=' + val), stdout)
+
+    def test_104_env_from_file(self):
+        envs = ['A=123', 'PWD=/some_dir', 'some weir:d\nvar_name= even we\nirder\tvalue']
+        manifest_envs = ['LD_LIBRARY_PATH=/lib']
+        host_envs = {'THIS_SHOULDNT_BE_PASSED': '1234'}
+        result = subprocess.run(['../../../../Tools/argv_serializer'] + envs,
+                                stdout=subprocess.PIPE, check=True)
+        with open('env_test_input', 'wb') as f:
+            f.write(result.stdout)
+        try:
+            manifest = self.get_manifest('env_from_file')
+            stdout, _ = self.run_binary([manifest], env=host_envs)
+            self.assertIn('# of envs: %d\n' % (len(envs) + len(manifest_envs)), stdout)
+            for i, arg in enumerate(envs + manifest_envs):
+                # We don't enforce any specific order of envs, so we skip checking the index.
+                self.assertIn('] = %s\n' % arg, stdout)
+        finally:
+            os.remove('env_test_input')
 
     @unittest.skipUnless(HAS_SGX,
         'This test is only meaningful on SGX PAL because only SGX catches raw '
         'syscalls and redirects to Graphene\'s LibOS. If we will add seccomp to '
         'Linux PAL, then we should allow this test on Linux PAL as well.')
-    def test_103_basic_bootstrapping_static(self):
+    def test_105_basic_bootstrapping_static(self):
         # bootstrap_static
         stdout, _ = self.run_binary(['bootstrap_static'])
         self.assertIn('Hello world (bootstrap_static)!', stdout)
 
-    def test_104_basic_bootstrapping_pie(self):
+    def test_106_basic_bootstrapping_pie(self):
         # bootstrap_pie
         stdout, _ = self.run_binary(['bootstrap_pie'])
         self.assertIn('User program started', stdout)
@@ -175,6 +208,15 @@ class TC_01_Bootstrap(RegressionTestCase):
     def test_500_init_fail(self):
         try:
             self.run_binary(['init_fail'])
+            self.fail('expected to return nonzero (and != 42)')
+        except subprocess.CalledProcessError as e:
+            self.assertNotEqual(e.returncode, 42, 'expected returncode != 42')
+
+    @unittest.skipUnless(HAS_SGX, 'This test relies on SGX-specific manifest options.')
+    def test_501_init_fail2(self):
+        try:
+            manifest = self.get_manifest('init_fail2')
+            self.run_binary([manifest], timeout=60)
             self.fail('expected to return nonzero (and != 42)')
         except subprocess.CalledProcessError as e:
             self.assertNotEqual(e.returncode, 42, 'expected returncode != 42')
@@ -611,3 +653,11 @@ class TC_90_CpuidSGX(RegressionTestCase):
     def test_000_cpuid(self):
         stdout, _ = self.run_binary(['cpuid'])
         self.assertIn('CPUID test passed.', stdout)
+
+# note that `rdtsc` also correctly runs on non-SGX PAL, but non-SGX CPU may not have rdtscp
+@unittest.skipUnless(HAS_SGX,
+    'This test is only meaningful on SGX PAL because only SGX emulates RDTSC/RDTSCP.')
+class TC_91_RdtscSGX(RegressionTestCase):
+    def test_000_rdtsc(self):
+        stdout, _ = self.run_binary(['rdtsc'])
+        self.assertIn('TEST OK', stdout)

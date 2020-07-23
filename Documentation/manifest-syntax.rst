@@ -75,25 +75,51 @@ or
 
 If you want your application to use commandline arguments you need to either set
 ``loader.insecure__use_cmdline_argv`` (insecure in almost all cases) or point
-``loader.argv_src_file`` to a file containing output of :file:`Tools/argv_serializer`.
+``loader.argv_src_file`` to a file containing output of
+:file:`Tools/argv_serializer`.
 
 ``loader.argv_src_file`` is intended to point to either a trusted file or a
 protected file. The former allows to securely hardcode arguments (current
 manifest syntax doesn't allow to include them inline), the latter allows the
-arguments to be provided at runtime from an external (trusted) source.
+arguments to be provided at runtime from an external (trusted) source. *NOTE:*
+Pointing to a protected file is currently not supported, due to the fact that
+PF wrap key provisioning currently happens after setting up arguments.
 
 Environment Variables
 ^^^^^^^^^^^^^^^^^^^^^
 
 ::
 
-   loader.env.[ENVIRON]=[VALUE]
+   loader.insecure__use_host_env = 1
 
-By default, the environment variables on the host will be passed to the library
-OS (this is insecure and will be fixed in the future). Specifying an environment
-variable using this syntax adds/overwrites it and passes to the library OS. This
-syntax can be used multiple times to specify more than one environment variable.
-An environment variable can be deleted by giving it an empty value.
+By default, environment variables from the host will *not* be passed to the app.
+This can be overridden by the option above, but most applications and runtime
+libraries trust their environment variables and are completely insecure when
+these are attacker-controlled. For example, an attacker can execute an
+additional dynamic library by specifying ``LD_PRELOAD`` variable.
+
+To securely set up the execution environment for an app you should use one or
+both of the following options:
+
+::
+
+   loader.env.[ENVIRON]=[VALUE]
+   loader.env_src_file = file:file_with_serialized_envs
+
+``loader.env.[ENVIRON]`` adds/overwrites a single environment variable and can
+be used multiple times to specify more than one variable.
+
+``loader.env_src_file`` allows to specify a URI to a file containing serialized
+environment, which can be generated using :file:`Tools/argv_serializer`. This
+option is intended to point to either a trusted file or a protected file. The
+former allows to securely hardcode environments (in a more flexible way than
+``loader.env.[ENVIRON]`` option), the latter allows the environments to be
+provided at runtime from an external (trusted) source. *NOTE:* Pointing to a
+protected file is currently not supported, due to the fact that PF wrap key
+provisioning currently happens after setting up environment variables.
+
+If the same variable is set in both, then ``loader.env.[ENVIRON]`` takes
+precedence.
 
 Debug Type
 ^^^^^^^^^^
@@ -282,6 +308,19 @@ ISV Product ID and SVN
 This syntax specifies the ISV Product ID and SVN to be added to the enclave
 signature.
 
+Allowed Files
+^^^^^^^^^^^^^
+
+::
+
+    sgx.allowed_files.[identifier]=[URI]
+
+This syntax specifies the files that are allowed to be loaded into the enclave
+unconditionally. These files are not cryptographically hashed and are thus not
+protected. It is insecure to allow files containing code or critical
+information; developers must not allow files blindly! Instead, use trusted or
+protected files.
+
 Trusted Files
 ^^^^^^^^^^^^^
 
@@ -296,17 +335,31 @@ hashes of these files and add them into the SGX-specific manifest
 a |~| trusted library cannot be silently replaced by a malicious host because
 the hash verification will fail.
 
-Allowed Files
-^^^^^^^^^^^^^
+Protected Files
+^^^^^^^^^^^^^^^
 
 ::
 
-    sgx.allowed_files.[identifier]=[URI]
+    sgx.protected_files_key=[16-byte hex value]
+    sgx.protected_files.[identifier]=[URI]
 
-This syntax specifies the files that are allowed to be loaded into the enclave
-unconditionally. These files are not cryptographically hashed and are thus not
-protected. It is insecure to allow files containing code or critical
-information; developers must not allow files blindly!
+This syntax specifies the files that are encrypted on disk and transparently
+decrypted when accessed by Graphene or by application running inside Graphene.
+Protected files guarantee data confidentiality and integrity (tamper
+resistance), as well as file swap protection (a protected file can only be
+accessed when in a specific path).
+
+URIs can be files or directories. If a directory is specified, all existing
+files/directories within it are registered as protected recursively (and are
+expected to be encrypted in the PF format). New files created in a protected
+directory are automatically treated as protected.
+
+Note that path size of a protected file is limited to 512 bytes and filename
+size is limited to 260 bytes.
+
+``sgx.protected_files_key`` specifies the wrap (master) encryption key and must
+be used only for debugging purposes. In production environments, this key must
+be provisioned to the enclave using local/remote attestation.
 
 Allowing File Creation
 ^^^^^^^^^^^^^^^^^^^^^^
@@ -392,3 +445,18 @@ This syntax specifies whether to enable SGX enclave-specific statistics:
 *Note:* this option is insecure and cannot be used with production enclaves
 (``sgx.debug = 0``). If the production enclave is started with this option set,
 Graphene will fail initialization of the enclave.
+
+Zero out heap on demand vs during enclave init
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+::
+
+    sgx.zero_heap_on_demand=[1|0]
+    (Default: 0)
+
+This syntax specifies whether to zero out the heap on demand (when new enclave
+pages are requested) or during enclave initialization. If this option is set to
+``1``, then the initial heap space is uninitialized; this improves start-up
+performance but worsens run-time performance. If this option is set to ``0``,
+then the whole heap is zeroed out before enclave starts app execution; this
+worsens start-up performance but improves run-time performance.

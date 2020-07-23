@@ -25,6 +25,7 @@ loader.env.LD_LIBRARY_PATH = $(PYTHONHOME)/lib:/lib:$(ARCH_LIBDIR):/usr/lib:/usr
 loader.env.PATH = $(PYTHONHOME)/bin:/usr/bin:/bin
 loader.env.PYTHONHOME = $(PYTHONHOME)
 loader.env.PYTHONPATH = $(PYTHONHOME):$(PYTHONHOME)/plat-$(ARCH_LONG):$(PYTHONDISTHOME):$(PYTHONHOME)/lib-dynload
+loader.env.HOME = /home/user
 
 # Mounted FSes. The following "chroot" FSes mount a part of the host FS into the
 # guest. Other parts of the host FS will not be available in the guest.
@@ -265,3 +266,5 @@ sgx.allowed_files.passwd    = file:/etc/passwd
 sgx.allowed_files.gaiconf   = file:/etc/gai.conf
 sgx.allowed_files.hostconf  = file:/etc/host.conf
 sgx.allowed_files.resolv    = file:/etc/resolv.conf
+
+sgx.zero_heap_on_demand = 1

@@ -17,10 +17,12 @@
 #include "pal_linux.h"
 #include "pal_linux_defs.h"
 #include "pal_security.h"
+#include "protected_files.h"
 
 #include <asm/ioctls.h>
 #include <asm/mman.h>
 #include <elf/elf.h>
+#include <stdint.h>
 #include <sysdeps/generic/ldsodefs.h>
 
 #include "ecall_types.h"
@@ -41,7 +43,7 @@ unsigned long _DkGetAllocationAlignment (void)
     return g_page_size;
 }
 
-void _DkGetAvailableUserAddressRange(PAL_PTR* start, PAL_PTR* end, PAL_NUM* gap) {
+void _DkGetAvailableUserAddressRange(PAL_PTR* start, PAL_PTR* end) {
     *start = (PAL_PTR)g_pal_sec.heap_min;
     *end   = (PAL_PTR)get_enclave_heap_top();
 
@@ -53,8 +55,6 @@ void _DkGetAvailableUserAddressRange(PAL_PTR* start, PAL_PTR* end, PAL_NUM* gap)
         SGX_DBG(DBG_E, "Not enough enclave memory, please increase enclave size!\n");
         ocall_exit(1, /*is_exitgroup=*/true);
     }
-
-    *gap = MEMORY_GAP;
 }
 
 PAL_NUM _DkGetProcessId (void)
@@ -106,16 +106,10 @@ static PAL_HANDLE setup_dummy_file_handle (const char * name)
     return handle;
 }
 
-static int loader_filter (const char * key, int len)
-{
-    if (len > 7 && key[0] == 'l' && key[1] == 'o' && key[2] == 'a' && key[3] == 'd' &&
-        key[4] == 'e' && key[5] == 'r' && key[6] == '.')
-        return 0;
-
-    if (len > 4 && key[0] == 's' && key[1] == 'g' && key[2] == 'x' && key[3] == '.')
-        return 0;
-
-    return 1;
+static bool loader_filter(const char* key, size_t len) {
+    // beware: `key` may not be NUL-terminated!
+    return (len >= strlen("loader.") && !memcmp(key, "loader.", strlen("loader.")))
+        || (len >= strlen("sgx.") && !memcmp(key, "sgx.", strlen("sgx.")));
 }
 
 /*
@@ -194,8 +188,14 @@ void pal_linux_main(char* uptr_args, uint64_t args_size, char* uptr_env, uint64_
      */
 
     PAL_HANDLE parent = NULL;
-    unsigned long start_time = _DkSystemTimeQuery();
     int rv;
+    uint64_t start_time;
+
+    rv = _DkSystemTimeQuery(&start_time);
+    if (rv < 0) {
+        SGX_DBG(DBG_E, "_DkSystemTimeQuery() failed: %d\n", rv);
+        ocall_exit(rv, /*is_exitgroup=*/true);
+    }
 
     struct pal_sec sec_info;
     if (!sgx_copy_to_enclave(&sec_info, sizeof(sec_info), uptr_sec_info, sizeof(sec_info))) {
@@ -206,6 +206,27 @@ void pal_linux_main(char* uptr_args, uint64_t args_size, char* uptr_env, uint64_
     g_pal_sec.heap_max = GET_ENCLAVE_TLS(heap_max);
     g_pal_sec.exec_addr = GET_ENCLAVE_TLS(exec_addr);
     g_pal_sec.exec_size = GET_ENCLAVE_TLS(exec_size);
+
+    g_pal_sec.zero_heap_on_demand = sec_info.zero_heap_on_demand;
+
+    if (!g_pal_sec.zero_heap_on_demand) {
+        /* zero the heap during init; we need to take care to not zero the exec area */
+        void* zero1_start = g_pal_sec.heap_min;
+        void* zero1_end   = g_pal_sec.heap_max;
+
+        void* zero2_start = g_pal_sec.heap_max;
+        void* zero2_end   = g_pal_sec.heap_max;
+
+        if (g_pal_sec.exec_addr != NULL) {
+            zero1_end   = g_pal_sec.exec_addr;
+            zero2_start = g_pal_sec.exec_addr + g_pal_sec.exec_size;
+            assert(zero1_start <= zero1_end);
+            assert(zero2_start <= zero2_end);
+        }
+
+        memset(zero1_start, 0, zero1_end - zero1_start);
+        memset(zero2_start, 0, zero2_end - zero2_start);
+    }
 
     /* relocate PAL itself */
     g_pal_map.l_addr = elf_machine_load_address();
@@ -275,6 +296,7 @@ void pal_linux_main(char* uptr_args, uint64_t args_size, char* uptr_env, uint64_
     init_enclave_key();
 
     init_cpuid();
+    init_tsc();
 
     /* now we can add a link map for PAL itself */
     setup_pal_map(&g_pal_map);
@@ -378,10 +400,20 @@ void pal_linux_main(char* uptr_args, uint64_t args_size, char* uptr_env, uint64_
         ocall_exit(rv, true);
     }
 
+    if ((rv = init_protected_files()) < 0) {
+        SGX_DBG(DBG_E, "Failed to initialize protected files: %d\n", rv);
+        ocall_exit(rv, true);
+    }
+
 #if PRINT_ENCLAVE_STAT == 1
-    printf("                >>>>>>>> "
-           "Enclave loading time =      %10ld milliseconds\n",
-           _DkSystemTimeQuery() - g_pal_sec.start_time);
+    uint64_t end_time;
+    rv = _DkSystemTimeQuery(&end_time);
+    if (rv < 0) {
+        SGX_DBG(DBG_E, "_DkSystemTimeQuery() failed: %d\n", rv);
+        ocall_exit(rv, /*is_exitgroup=*/true);
+    }
+    printf("                >>>>>>>> Enclave loading time =      %10ld milliseconds\n",
+           end_time - g_pal_sec.start_time);
 #endif
 
     /* set up thread handle */

@@ -93,9 +93,8 @@ int init_enclave_pages(void) {
             goto out;
         }
 
-        exec_vma->bottom = SATURATED_P_SUB(g_pal_sec.exec_addr, MEMORY_GAP, g_heap_bottom);
-        exec_vma->top = SATURATED_P_ADD(g_pal_sec.exec_addr + g_pal_sec.exec_size, MEMORY_GAP,
-                                        g_heap_top);
+        exec_vma->bottom = g_pal_sec.exec_addr;
+        exec_vma->top = g_pal_sec.exec_addr + g_pal_sec.exec_size;
         exec_vma->is_pal_internal = false;
         INIT_LIST_HEAD(exec_vma, list);
         LISTP_ADD(exec_vma, &g_heap_vma_list, list);
@@ -163,8 +162,10 @@ static void* __create_vma_and_merge(void* addr, size_t size, bool is_pal_interna
     vma->top             = addr + size;
     vma->is_pal_internal = is_pal_internal;
 
-    /* initialize the contents of the new VMA to zero */
-    memset(vma->bottom, 0, vma->top - vma->bottom);
+    if (g_pal_sec.zero_heap_on_demand) {
+        /* initialize the contents of the new VMA to zero */
+        memset(vma->bottom, 0, vma->top - vma->bottom);
+    }
 
     /* how much memory was freed because [addr, addr + size) overlapped with VMAs */
     size_t freed = 0;

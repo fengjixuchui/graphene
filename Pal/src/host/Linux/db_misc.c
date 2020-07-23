@@ -49,7 +49,7 @@ unsigned long _DkSystemTimeQueryEarly(void) {
 #endif
 }
 
-unsigned long _DkSystemTimeQuery(void) {
+int _DkSystemTimeQuery(uint64_t* out_usec) {
 #if USE_CLOCK_GETTIME == 1
     struct timespec time;
     int ret;
@@ -64,12 +64,12 @@ unsigned long _DkSystemTimeQuery(void) {
     }
 #endif
 
-    /* Come on, gettimeofday mostly never fails */
     if (IS_ERR(ret))
-        return 0;
+        return ret;
 
     /* in microseconds */
-    return 1000000ULL * time.tv_sec + time.tv_nsec / 1000;
+    *out_usec = 1000000 * (uint64_t)time.tv_sec + time.tv_nsec / 1000;
+    return 0;
 #else
     struct timeval time;
     int ret;
@@ -88,12 +88,12 @@ unsigned long _DkSystemTimeQuery(void) {
     }
 #endif
 
-    /* Come on, gettimeofday mostly never fails */
     if (IS_ERR(ret))
-        return 0;
+        return ret;
 
     /* in microseconds */
-    return 1000000ULL * time.tv_sec + time.tv_usec;
+    *out_usec = 1000000 * (uint64_t)time.tv_sec + time.tv_usec;
+    return 0;
 #endif
 }
 
@@ -146,5 +146,10 @@ int _DkAttestationQuote(PAL_PTR user_report_data, PAL_NUM user_report_data_size,
     __UNUSED(user_report_data_size);
     __UNUSED(quote);
     __UNUSED(quote_size);
+    return -PAL_ERROR_NOTIMPLEMENTED;
+}
+
+int _DkSetProtectedFilesKey(PAL_PTR pf_key_hex) {
+    __UNUSED(pf_key_hex);
     return -PAL_ERROR_NOTIMPLEMENTED;
 }

@@ -1,11 +1,16 @@
+include ../../../../Scripts/Makefile.configs
+
+c_executables-x86_64 = \
+	attestation \
+	cpuid \
+	rdtsc
+
 c_executables = \
 	abort \
 	abort_multithread \
-	attestation \
 	bootstrap \
 	bootstrap_pie \
 	bootstrap_static \
-	cpuid \
 	dev \
 	epoll_wait_timeout \
 	eventfd \
@@ -67,7 +72,8 @@ c_executables = \
 	tcp_msg_peek \
 	udp \
 	unix \
-	vfork_and_exec
+	vfork_and_exec \
+	$(c_executables-$(ARCH))
 
 cxx_executables = bootstrap_c++
 
@@ -76,6 +82,8 @@ manifests = \
 	argv_from_file.manifest \
 	attestation.manifest \
 	echo.manifest \
+	env_from_file.manifest \
+	env_from_host.manifest \
 	eventfd.manifest \
 	exec_victim.manifest \
 	exit_group.manifest \
@@ -87,6 +95,7 @@ manifests = \
 	getdents.manifest \
 	host_root_fs.manifest \
 	init_fail.manifest \
+	init_fail2.manifest \
 	large_mmap.manifest \
 	mmap_file.manifest \
 	multi_pthread.manifest \
@@ -101,8 +110,11 @@ exec_target = \
 	$(cxx_executables) \
 	argv_from_file.manifest \
 	echo.manifest \
+	env_from_file.manifest \
+	env_from_host.manifest \
 	file_check_policy_allow_all_but_log.manifest \
 	file_check_policy_strict.manifest \
+	init_fail2.manifest \
 	multi_pthread_exitless.manifest \
 	sh.manifest
 
@@ -116,7 +128,6 @@ extra_rules = \
 	-e 's:\$$(RA_CLIENT_SPID):$(if $(RA_CLIENT_SPID),$(RA_CLIENT_SPID),AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA):g' \
 	-e 's:\$$(RA_CLIENT_LINKABLE):$(if $(RA_CLIENT_LINKABLE),$(RA_CLIENT_LINKABLE),0):g'
 
-include ../../../../Scripts/Makefile.configs
 include ../../../../Scripts/Makefile.manifest
 include ../../../../Scripts/Makefile.Test
 

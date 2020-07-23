@@ -38,6 +38,15 @@ Graphene:
 - `EuroSys 2014 <http://www.cs.unc.edu/~porter/pubs/tsai14graphene.pdf>`__
 - `ATC 2017 <http://www.cs.unc.edu/~porter/pubs/graphene-sgx.pdf>`__
 
+Graphene is *not a production-ready software* (yet)
+===================================================
+
+We are still in a process of transition from a research proof-of-concept into a
+more reliable piece of software. The most important problems (which include
+major security issues) are tracked in
+`#1544 (Production blockers) <https://github.com/oscarlab/graphene/issues/1544>`__.
+You should read it before installing and using Graphene.
+
 How to get Graphene?
 ====================
 
@@ -66,11 +75,6 @@ three options for specifying the programs and manifest files:
 
    [PATH TO Runtime]/pal_loader [MANIFEST] [ARGUMENTS]...
 
-- option 3 (manifest as a script)::
-
-   [PATH TO MANIFEST]/[MANIFEST] [ARGUMENTS]...
-   (Manifest must have "#![PATH_TO_PAL]/libpal.so" as the first line)
-
 Running an application requires some minimal configuration in the application's
 manifest file. A |nbsp| sensible manifest file will include paths to the library
 OS and other libraries the application requires; environment variables, such as
@@ -93,16 +97,11 @@ For the full documentation of the Graphene manifest syntax, see the `Graphene
 documentation
 <https://graphene.readthedocs.io/en/latest/manifest-syntax.html>`__.
 
+Automatically running applications via Graphene Shielded Containers (GSC)
+-------------------------------------------------------------------------
 
-Graphene is *not a production-ready software* (yet)
-===================================================
-
-We are still in a process of transition from a research proof-of-concept into a
-more reliable piece of software. The most important problems (which include
-major security issues) are tracked in
-`#1544 (Production blockers) <https://github.com/oscarlab/graphene/issues/1544>`__.
-You should read it before installing and using Graphene.
-
+Applications deployed as Docker images may be graphenized via the `gsc tool
+<https://graphene.readthedocs.io/en/latest/manpages/gsc.html>`__.
 
 Getting help
 ============
@@ -121,13 +120,6 @@ Deprecated Code
 ===============
 
 We have some branches with legacy code (use at your own risk).
-
-Docker support
---------------
-
-We are actively working on adding a proper Docker support. You can find the old
-and deprecated implementation on `DEPRECATED/gsc
-<https://github.com/oscarlab/graphene/tree/DEPRECATED/gsc>`__ branch.
 
 Build with Kernel-Level Sandboxing
 ----------------------------------

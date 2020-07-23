@@ -202,7 +202,7 @@ noreturn void pal_main(
 
 /* For initialization */
 unsigned long _DkGetAllocationAlignment (void);
-void _DkGetAvailableUserAddressRange(PAL_PTR* start, PAL_PTR* end, PAL_NUM* gap);
+void _DkGetAvailableUserAddressRange(PAL_PTR* start, PAL_PTR* end);
 bool _DkCheckMemoryMappable (const void * addr, size_t size);
 PAL_NUM _DkGetProcessId (void);
 PAL_NUM _DkGetHostId (void);
@@ -279,7 +279,7 @@ void _DkExceptionReturn (void * event);
 void _DkInternalLock(PAL_LOCK* mut);
 void _DkInternalUnlock(PAL_LOCK* mut);
 bool _DkInternalIsLocked(PAL_LOCK* mut);
-unsigned long _DkSystemTimeQuery (void);
+int _DkSystemTimeQuery(uint64_t* out_usec);
 
 /*
  * Cryptographically secure random.
@@ -295,6 +295,7 @@ int _DkAttestationReport(PAL_PTR user_report_data, PAL_NUM* user_report_data_siz
                          PAL_PTR report, PAL_NUM* report_size);
 int _DkAttestationQuote(PAL_PTR user_report_data, PAL_NUM user_report_data_size,
                         PAL_PTR quote, PAL_NUM* quote_size);
+int _DkSetProtectedFilesKey(PAL_PTR pf_key_hex);
 
 #define INIT_FAIL(exitcode, reason)                                                     \
     do {                                                                                \

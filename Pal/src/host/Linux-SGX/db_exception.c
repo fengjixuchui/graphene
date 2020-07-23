@@ -109,6 +109,24 @@ static void save_pal_context(PAL_CONTEXT* ctx, sgx_cpu_context_t* uc,
     }
 }
 
+static void emulate_rdtsc_and_print_warning(sgx_cpu_context_t* uc) {
+    static int first = 0;
+    if (__atomic_exchange_n(&first, 1, __ATOMIC_RELAXED) == 0) {
+        SGX_DBG(DBG_E, "WARNING: all RDTSC/RDTSCP instructions are emulated (imprecisely) via "
+                       "gettime() syscall.\n");
+    }
+
+    uint64_t usec;
+    int res = _DkSystemTimeQuery(&usec);
+    if (res < 0) {
+        SGX_DBG(DBG_E, "_DkSystemTimeQuery() failed in unrecoverable context, exiting.\n");
+        _DkProcessExit(1);
+    }
+    /* FIXME: Ideally, we would like to scale microseconds back to RDTSC clock cycles */
+    uc->rdx = (uint32_t)(usec >> 32);
+    uc->rax = (uint32_t)usec;
+}
+
 /* return value: true if #UD was handled and execution can be continued without propagating #UD;
  *               false if #UD was not handled and exception needs to be raised up to LibOS/app */
 static bool handle_ud(sgx_cpu_context_t* uc) {
@@ -126,10 +144,21 @@ static bool handle_ud(sgx_cpu_context_t* uc) {
         }
     } else if (instr[0] == 0x0f && instr[1] == 0x31) {
         /* rdtsc */
+        emulate_rdtsc_and_print_warning(uc);
         uc->rip += 2;
-        uc->rdx = 0;
-        uc->rax = 0;
         return true;
+    }  else if (instr[0] == 0x0f && instr[1] == 0x01 && instr[2] == 0xf9) {
+        /* rdtscp */
+        emulate_rdtsc_and_print_warning(uc);
+        uc->rip += 3;
+        uc->rcx = 0; /* dummy IA32_TSC_AUX; Linux encodes it as (numa_id << 12) | cpu_id */
+        return true;
+    } else if (instr[0] == 0xf3 && (instr[1] & ~1) == 0x48 && instr[2] == 0x0f &&
+               instr[3] == 0xae && instr[4] >> 6 == 0b11 && ((instr[4] >> 3) & 0b111) < 4) {
+        /* A disabled {RD,WR}{FS,GS}BASE instruction generated a #UD */
+        SGX_DBG(DBG_E, "The {RD,WR}{FS,GS}BASE instruction is not currently enabled. "
+                       "Please reload Graphene SGX kernel module.\n");
+        return false;
     } else if (instr[0] == 0x0f && instr[1] == 0x05) {
         /* syscall: LibOS may know how to handle this */
         return false;
@@ -185,15 +214,22 @@ void _DkExceptionHandler(unsigned int exit_info, sgx_cpu_context_t* uc,
         event_num != PAL_EVENT_QUIT &&
         event_num != PAL_EVENT_SUSPEND &&
         event_num != PAL_EVENT_RESUME) {
-        printf("*** Unexpected AEX vector occurred inside PAL! ***\n"
-               "(vector = 0x%x, type = 0x%x valid = %d, RIP = +0x%08lx)\n"
-               "rax: 0x%08lx rcx: 0x%08lx rdx: 0x%08lx rbx: 0x%08lx\n"
+        printf("*** Unexpected exception occurred inside PAL at RIP = +0x%08lx! ***\n",
+               uc->rip - (uintptr_t)TEXT_START);
+
+        if (ei.info.valid) {
+            /* EXITINFO field: vector = exception number, exit_type = 0x3 for HW / 0x6 for SW */
+            printf("(SGX HW reported AEX vector 0x%x with exit_type = 0x%x)\n",
+                   ei.info.vector, ei.info.exit_type);
+        } else {
+            printf("(untrusted PAL sent PAL event 0x%x)\n", ei.intval);
+        }
+
+        printf("rax: 0x%08lx rcx: 0x%08lx rdx: 0x%08lx rbx: 0x%08lx\n"
                "rsp: 0x%08lx rbp: 0x%08lx rsi: 0x%08lx rdi: 0x%08lx\n"
                "r8 : 0x%08lx r9 : 0x%08lx r10: 0x%08lx r11: 0x%08lx\n"
                "r12: 0x%08lx r13: 0x%08lx r14: 0x%08lx r15: 0x%08lx\n"
                "rflags: 0x%08lx rip: 0x%08lx\n",
-               ei.info.vector, ei.info.exit_type, ei.info.valid,
-               uc->rip - (uintptr_t)TEXT_START,
                uc->rax, uc->rcx, uc->rdx, uc->rbx,
                uc->rsp, uc->rbp, uc->rsi, uc->rdi,
                uc->r8, uc->r9, uc->r10, uc->r11,
