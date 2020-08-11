@@ -127,9 +127,9 @@ int ipc_pid_kill_callback(struct shim_ipc_msg* msg, struct shim_ipc_port* port) 
 int ipc_pid_getstatus_send(struct shim_ipc_port* port, IDTYPE dest, int npids, IDTYPE* pids,
                            struct pid_status** status) {
     size_t total_msg_size =
-        get_ipc_msg_duplex_size(sizeof(struct shim_ipc_pid_getstatus) + sizeof(IDTYPE) * npids);
-    struct shim_ipc_msg_duplex* msg = __alloca(total_msg_size);
-    init_ipc_msg_duplex(msg, IPC_PID_GETSTATUS, total_msg_size, dest);
+        get_ipc_msg_with_ack_size(sizeof(struct shim_ipc_pid_getstatus) + sizeof(IDTYPE) * npids);
+    struct shim_ipc_msg_with_ack* msg = __alloca(total_msg_size);
+    init_ipc_msg_with_ack(msg, IPC_PID_GETSTATUS, total_msg_size, dest);
 
     struct shim_ipc_pid_getstatus* msgin = (struct shim_ipc_pid_getstatus*)&msg->msg.msg;
     msgin->npids                         = npids;
@@ -137,7 +137,7 @@ int ipc_pid_getstatus_send(struct shim_ipc_port* port, IDTYPE dest, int npids, I
 
     debug("ipc send to %u: IPC_PID_GETSTATUS(%d, [%u, ...])\n", dest, npids, pids[0]);
 
-    return send_ipc_message_duplex(msg, port, NULL, status);
+    return send_ipc_message_with_ack(msg, port, NULL, status);
 }
 
 struct thread_status {
@@ -220,7 +220,7 @@ int ipc_pid_retstatus_callback(IPC_CALLBACK_ARGS) {
     else
         debug("ipc callback from %u: IPC_PID_RETSTATUS(0, [])\n", msg->src);
 
-    struct shim_ipc_msg_duplex* obj = pop_ipc_msg_duplex(port, msg->seq);
+    struct shim_ipc_msg_with_ack* obj = pop_ipc_msg_with_ack(port, msg->seq);
     if (obj) {
         struct pid_status** status = (struct pid_status**)obj->private;
 
@@ -408,9 +408,9 @@ int ipc_pid_getmeta_send(IDTYPE pid, enum pid_meta_code code, void** data) {
     if ((ret = connect_owner(pid, &port, &dest)) < 0)
         goto out;
 
-    size_t total_msg_size           = get_ipc_msg_duplex_size(sizeof(struct shim_ipc_pid_getmeta));
-    struct shim_ipc_msg_duplex* msg = __alloca(total_msg_size);
-    init_ipc_msg_duplex(msg, IPC_PID_GETMETA, total_msg_size, dest);
+    size_t total_msg_size = get_ipc_msg_with_ack_size(sizeof(struct shim_ipc_pid_getmeta));
+    struct shim_ipc_msg_with_ack* msg = __alloca(total_msg_size);
+    init_ipc_msg_with_ack(msg, IPC_PID_GETMETA, total_msg_size, dest);
 
     struct shim_ipc_pid_getmeta* msgin = (struct shim_ipc_pid_getmeta*)&msg->msg.msg;
     msgin->pid  = pid;
@@ -418,7 +418,7 @@ int ipc_pid_getmeta_send(IDTYPE pid, enum pid_meta_code code, void** data) {
 
     debug("ipc send to %u: IPC_PID_GETMETA(%u, %s)\n", dest, pid, pid_meta_code_str[code]);
 
-    ret = send_ipc_message_duplex(msg, port, NULL, data);
+    ret = send_ipc_message_with_ack(msg, port, NULL, data);
     put_ipc_port(port);
 out:
     return ret;
@@ -512,7 +512,7 @@ int ipc_pid_retmeta_callback(IPC_CALLBACK_ARGS) {
     debug("ipc callback from %u: IPC_PID_RETMETA(%u, %s, %d)\n", msg->src, msgin->pid,
           pid_meta_code_str[msgin->code], msgin->datasize);
 
-    struct shim_ipc_msg_duplex* obj = pop_ipc_msg_duplex(port, msg->seq);
+    struct shim_ipc_msg_with_ack* obj = pop_ipc_msg_with_ack(port, msg->seq);
     if (obj) {
         void** data = (void**)obj->private;
 
@@ -526,179 +526,4 @@ int ipc_pid_retmeta_callback(IPC_CALLBACK_ARGS) {
     }
 
     return 0;
-}
-
-int get_pid_port(IDTYPE pid, IDTYPE* dest, struct shim_ipc_port** port) {
-    IDTYPE owner = 0;
-    int ret;
-
-    if ((ret = connect_owner(pid, port, &owner)) < 0)
-        return ret;
-
-    if (dest)
-        *dest = owner;
-
-    return 0;
-}
-
-int ipc_pid_nop_send(struct shim_ipc_port* port, IDTYPE dest, int count, const void* buf, int len) {
-    size_t total_msg_size = get_ipc_msg_duplex_size(sizeof(struct shim_ipc_pid_nop) + len);
-    struct shim_ipc_msg_duplex* msg = __alloca(total_msg_size);
-    init_ipc_msg_duplex(msg, IPC_PID_NOP, total_msg_size, dest);
-
-    struct shim_ipc_pid_nop* msgin = (struct shim_ipc_pid_nop*)&msg->msg.msg;
-    msgin->count = count * 2;
-    memcpy(msgin->payload, buf, len);
-
-    debug("ipc send to %u: IPC_PID_NOP(%d)\n", dest, count * 2);
-
-    return send_ipc_message_duplex(msg, port, NULL, NULL);
-}
-
-int ipc_pid_nop_callback(IPC_CALLBACK_ARGS) {
-    struct shim_ipc_pid_nop* msgin = (struct shim_ipc_pid_nop*)&msg->msg;
-
-    debug("ipc callback from %u: IPC_PID_NOP(%d)\n", msg->src, msgin->count);
-
-    if (!(--msgin->count)) {
-        struct shim_ipc_msg_duplex* obj = pop_ipc_msg_duplex(port, msg->seq);
-        if (obj && obj->thread)
-            thread_wakeup(obj->thread);
-        return 0;
-    }
-
-    debug("ipc send to %u: IPC_PID_NOP(%d)\n", msg->src, msgin->count);
-
-    return send_ipc_message(msg, port);
-}
-
-int ipc_pid_sendrpc_send(IDTYPE pid, IDTYPE sender, const void* buf, int len) {
-    int ret = 0;
-    IDTYPE dest;
-    struct shim_ipc_port* port = NULL;
-
-    if ((ret = get_pid_port(pid, &dest, &port)) < 0)
-        return ret;
-
-    size_t total_msg_size    = get_ipc_msg_size(sizeof(struct shim_ipc_pid_sendrpc) + len);
-    struct shim_ipc_msg* msg = __alloca(total_msg_size);
-    init_ipc_msg(msg, IPC_PID_SENDRPC, total_msg_size, dest);
-    struct shim_ipc_pid_sendrpc* msgin = (struct shim_ipc_pid_sendrpc*)&msg->msg;
-
-    debug("ipc send to %u: IPC_PID_SENDPRC(%d)\n", dest, len);
-    msgin->sender = sender;
-    msgin->len    = len;
-    memcpy(msgin->payload, buf, len);
-
-    ret = send_ipc_message(msg, port);
-    put_ipc_port(port);
-    return ret;
-}
-
-DEFINE_LIST(rpcmsg);
-struct rpcmsg {
-    LIST_TYPE(rpcmsg) list;
-    IDTYPE sender;
-    int len;
-    char payload[];
-};
-
-DEFINE_LIST(rpcreq);
-struct rpcreq {
-    LIST_TYPE(rpcreq) list;
-    struct shim_thread* thread;
-    IDTYPE sender;
-    int len;
-    void* buffer;
-};
-
-DEFINE_LISTP(rpcmsg);
-DEFINE_LISTP(rpcreq);
-static LISTP_TYPE(rpcmsg) rpc_msgs;
-static LISTP_TYPE(rpcreq) rpc_reqs;
-static struct shim_lock rpc_queue_lock;
-
-int get_rpc_msg(IDTYPE* sender, void* buf, int len) {
-    if (!create_lock_runtime(&rpc_queue_lock)) {
-        return -ENOMEM;
-    }
-    lock(&rpc_queue_lock);
-
-    if (!LISTP_EMPTY(&rpc_msgs)) {
-        struct rpcmsg* m = LISTP_FIRST_ENTRY(&rpc_msgs, struct rpcmsg, list);
-        LISTP_DEL(m, &rpc_msgs, list);
-        if (m->len < len)
-            len = m->len;
-        if (sender)
-            *sender = m->sender;
-        memcpy(buf, m->payload, len);
-        unlock(&rpc_queue_lock);
-        return len;
-    }
-
-    struct rpcreq* r = malloc(sizeof(struct rpcreq));
-    if (!r) {
-        unlock(&rpc_queue_lock);
-        return -ENOMEM;
-    }
-
-    INIT_LIST_HEAD(r, list);
-    r->sender = 0;
-    r->len    = len;
-    r->buffer = buf;
-    thread_setwait(&r->thread, NULL);
-    LISTP_ADD_TAIL(r, &rpc_reqs, list);
-
-    unlock(&rpc_queue_lock);
-    thread_sleep(NO_TIMEOUT);
-
-    put_thread(r->thread);
-    if (sender)
-        *sender = r->sender;
-    int ret = r->len;
-
-    free(r);
-    return ret;
-}
-
-int ipc_pid_sendrpc_callback(IPC_CALLBACK_ARGS) {
-    __UNUSED(port);  // API compatibility
-    int ret = 0;
-    struct shim_ipc_pid_sendrpc* msgin = (struct shim_ipc_pid_sendrpc*)msg->msg;
-
-    debug("ipc callback from %u: IPC_PID_SENDPRC(%u, %d)\n", msg->src, msgin->sender, msgin->len);
-
-    if (!create_lock_runtime(&rpc_queue_lock)) {
-        ret = -ENOMEM;
-        goto out;
-    }
-    lock(&rpc_queue_lock);
-
-    if (!LISTP_EMPTY(&rpc_reqs)) {
-        struct rpcreq* r = LISTP_FIRST_ENTRY(&rpc_reqs, struct rpcreq, list);
-        LISTP_DEL(r, &rpc_reqs, list);
-        if (msgin->len < r->len)
-            r->len = msgin->len;
-        r->sender = msgin->sender;
-        memcpy(r->buffer, msgin->payload, r->len);
-        thread_wakeup(r->thread);
-        goto out_unlock;
-    }
-
-    struct rpcmsg* m = malloc(sizeof(struct rpcmsg) + msgin->len);
-    if (!m) {
-        ret = -ENOMEM;
-        goto out_unlock;
-    }
-
-    INIT_LIST_HEAD(m, list);
-    m->sender = msgin->sender;
-    m->len    = msgin->len;
-    memcpy(m->payload, msgin->payload, msgin->len);
-    LISTP_ADD_TAIL(m, &rpc_msgs, list);
-
-out_unlock:
-    unlock(&rpc_queue_lock);
-out:
-    return ret;
 }

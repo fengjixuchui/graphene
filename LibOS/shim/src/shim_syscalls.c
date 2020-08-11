@@ -314,7 +314,7 @@ DEFINE_SHIM_SYSCALL(wait4, 4, shim_do_wait4, pid_t, pid_t, pid, int*, stat_addr,
 DEFINE_SHIM_SYSCALL(kill, 2, shim_do_kill, int, pid_t, pid, int, sig)
 
 /* uname: sys/shim_uname.c */
-DEFINE_SHIM_SYSCALL(uname, 1, shim_do_uname, int, struct old_utsname*, buf)
+DEFINE_SHIM_SYSCALL(uname, 1, shim_do_uname, int, struct new_utsname*, buf)
 
 /* semget: sys/shim_semget.c */
 DEFINE_SHIM_SYSCALL(semget, 3, shim_do_semget, int, key_t, key, int, nsems, int, semflg)
@@ -610,9 +610,9 @@ SHIM_SYSCALL_RETURN_ENOSYS(swapoff, 1, int, const char*, specialfile)
 
 SHIM_SYSCALL_RETURN_ENOSYS(reboot, 4, int, int, magic1, int, magic2, int, cmd, void*, arg)
 
-SHIM_SYSCALL_RETURN_ENOSYS(sethostname, 2, int, char*, name, int, len)
+DEFINE_SHIM_SYSCALL(sethostname, 2, shim_do_sethostname, long, char*, name, int, len)
 
-SHIM_SYSCALL_RETURN_ENOSYS(setdomainname, 2, int, char*, name, int, len)
+DEFINE_SHIM_SYSCALL(setdomainname, 2, shim_do_setdomainname, long, char*, name, int, len)
 
 #if defined(__i386__) || defined(__x86_64__)
 SHIM_SYSCALL_RETURN_ENOSYS(iopl, 1, int, int, level)
@@ -1029,15 +1029,3 @@ SHIM_SYSCALL_RETURN_ENOSYS(setns, 2, int, int, fd, int, nstype)
 
 DEFINE_SHIM_SYSCALL(getcpu, 3, shim_do_getcpu, int, unsigned*, cpu, unsigned*, node,
                     struct getcpu_cache*, cache)
-
-/* libos calls */
-
-DEFINE_SHIM_SYSCALL(msgpersist, 2, shim_do_msgpersist, int, int, msqid, int, cmd)
-
-DEFINE_SHIM_SYSCALL(benchmark_rpc, 4, shim_do_benchmark_rpc, int, pid_t, pid, int, times,
-                    const void*, buf, size_t, size)
-
-DEFINE_SHIM_SYSCALL(send_rpc, 3, shim_do_send_rpc, size_t, pid_t, pid, const void*, buf, size_t,
-                    size)
-
-DEFINE_SHIM_SYSCALL(recv_rpc, 3, shim_do_recv_rpc, size_t, pid_t*, pid, void*, buf, size_t, size)

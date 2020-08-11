@@ -191,7 +191,7 @@ enum PAL_PROT {
 
 
 /*!
- * \brief Allocate virtual memory for the library OS.
+ * \brief Allocate virtual memory for the library OS and zero it out.
  *
  * \param addr
  *  can be either `NULL` or any valid address aligned at the allocation alignment. When `addr` is
@@ -692,8 +692,7 @@ void DkObjectClose(PAL_HANDLE objectHandle);
  * \brief Get the current time
  * \return the current time in microseconds
  */
-PAL_NUM
-DkSystemTimeQuery(void);
+PAL_NUM DkSystemTimeQuery(void);
 
 /*!
  * \brief Cryptographically secure random.

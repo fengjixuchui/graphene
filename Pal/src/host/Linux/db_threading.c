@@ -102,7 +102,7 @@ int pal_thread_init(void* tcbptr) {
     }
 
     if (tcb->callback)
-        return (*tcb->callback) (tcb->param);
+        return (*tcb->callback)(tcb->param);
 
     return 0;
 }
@@ -158,6 +158,8 @@ int _DkThreadCreate (PAL_HANDLE * handle, int (*callback) (void *),
     /* align child_stack to 16 */
     child_stack = ALIGN_DOWN_PTR(child_stack, 16);
 
+    // TODO: pal_thread_init() may fail during initialization, we should check its result (but this
+    // happens asynchronously, so it's not trivial to do).
     ret = clone(pal_thread_init, child_stack,
                 CLONE_VM | CLONE_FS | CLONE_FILES | CLONE_SYSVSEM | CLONE_THREAD |
                 CLONE_SIGHAND | CLONE_PARENT_SETTID,
@@ -177,28 +179,25 @@ err:
     return ret;
 }
 
-int _DkThreadDelayExecution (unsigned long * duration)
-{
+int _DkThreadDelayExecution(uint64_t* duration_us) {
     struct timespec sleeptime;
     struct timespec remainingtime;
 
-    const unsigned long VERY_LONG_TIME_IN_US = 1000000L * 60 * 60 * 24 * 365 * 128;
-    if (*duration > VERY_LONG_TIME_IN_US) {
+    const uint64_t VERY_LONG_TIME_IN_US = (uint64_t)1000000 * 60 * 60 * 24 * 365 * 128;
+    if (*duration_us > VERY_LONG_TIME_IN_US) {
         /* avoid overflow with time_t */
         sleeptime.tv_sec  = VERY_LONG_TIME_IN_US / 1000000;
         sleeptime.tv_nsec = 0;
     } else {
-        sleeptime.tv_sec = *duration / 1000000;
-        sleeptime.tv_nsec = (*duration - sleeptime.tv_sec * 1000000) * 1000;
+        sleeptime.tv_sec = *duration_us / 1000000;
+        sleeptime.tv_nsec = (*duration_us - sleeptime.tv_sec * (uint64_t)1000000) * 1000;
     }
 
     int ret = INLINE_SYSCALL(nanosleep, 2, &sleeptime, &remainingtime);
 
     if (IS_ERR(ret)) {
-        PAL_NUM remaining = remainingtime.tv_sec * 1000000 +
-                            remainingtime.tv_nsec / 1000;
-
-        *duration -= remaining;
+        PAL_NUM remaining = remainingtime.tv_sec * 1000000 + remainingtime.tv_nsec / 1000;
+        *duration_us -= remaining;
         return -PAL_ERROR_INTERRUPTED;
     }
 
@@ -280,6 +279,6 @@ int _DkThreadResume (PAL_HANDLE threadHandle)
     return 0;
 }
 
-struct handle_ops thread_ops = {
+struct handle_ops g_thread_ops = {
     /* nothing */
 };

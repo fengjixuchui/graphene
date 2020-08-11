@@ -66,9 +66,12 @@ extern struct pal_enclave {
     /* manifest */
     struct config_store * config;
 
+    /* Path to the PAL binary */
+    char* libpal_uri;
+
     /* security information */
     struct pal_sec pal_sec;
-} pal_enclave;
+} g_pal_enclave;
 
 int open_sgx_driver(bool need_gsgx);
 bool is_wrfsbase_supported (void);

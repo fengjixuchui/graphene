@@ -18,8 +18,11 @@ int open_sgx_driver(bool need_gsgx) {
     if (need_gsgx) {
         g_gsgx_device = INLINE_SYSCALL(open, 3, GSGX_FILE, O_RDWR | O_CLOEXEC, 0);
         if (IS_ERR(g_gsgx_device)) {
-            SGX_DBG(DBG_E, "Cannot open device " GSGX_FILE ". Please make sure the"
-                    " Graphene SGX kernel module is loaded.\n");
+            SGX_DBG(DBG_E, "\n\tSystem does not support FSGSBASE instructions, which Graphene requires on SGX.\n\n"
+                    "\tThe best option is to move to a newer Linux kernel with FSGSBASE support (5.9+), or\n"
+                    "\ta kernel with a back-ported patch to support FSGSBASE.\n"
+                    "\tOne may also load the Graphene SGX kernel, although this is insecure.\n"
+                    "\tIf the Graphene SGX module is loaded, check permissions on the device " GSGX_FILE ", as we cannot open this file.\n\n");
             return -ERRNO(g_gsgx_device);
         }
     }
@@ -145,7 +148,19 @@ int create_enclave(sgx_arch_secs_t * secs,
      * SIGSTRUCT during EINIT (see pp21 for ECREATE and pp34 for
      * EINIT in https://software.intel.com/sites/default/files/managed/48/88/329298-002.pdf). */
 
-    uint64_t addr = INLINE_SYSCALL(mmap, 6, secs->base, secs->size,
+    uint64_t request_mmap_addr = secs->base;
+    uint64_t request_mmap_size = secs->size;
+
+#ifdef SGX_DCAP_16_OR_LATER
+    /* newer DCAP/in-kernel SGX drivers allow starting enclave address space with non-zero;
+     * the below trick to start from DEFAULT_HEAP_MIN is to avoid vm.mmap_min_addr==0 issue */
+    if (request_mmap_addr < DEFAULT_HEAP_MIN) {
+        request_mmap_size -= DEFAULT_HEAP_MIN - request_mmap_addr;
+        request_mmap_addr  = DEFAULT_HEAP_MIN;
+    }
+#endif
+
+    uint64_t addr = INLINE_SYSCALL(mmap, 6, request_mmap_addr, request_mmap_size,
                                    PROT_NONE, /* newer DCAP driver requires such initial mmap */
 #ifdef SGX_DCAP_16_OR_LATER
                                    MAP_FIXED | MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
@@ -163,7 +178,7 @@ int create_enclave(sgx_arch_secs_t * secs,
         return -ENOMEM;
     }
 
-    assert(secs->base == addr);
+    assert(addr == request_mmap_addr);
 
     struct sgx_enclave_create param = {
         .src = (uint64_t) secs,

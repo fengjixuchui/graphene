@@ -320,12 +320,6 @@ long __shim_sendmmsg(long, long, long, long);
 long __shim_setns(long, long);
 long __shim_getcpu(long, long, long);
 
-/* libos call entries */
-long __shim_msgpersist(long, long);
-long __shim_benchmark_rpc(long, long, long, long);
-long __shim_send_rpc(long, long, long);
-long __shim_recv_rpc(long, long, long);
-
 /* syscall implementation */
 size_t shim_do_read(int fd, void* buf, size_t count);
 size_t shim_do_write(int fd, const void* buf, size_t count);
@@ -394,7 +388,7 @@ int shim_do_execve(const char* file, const char** argv, const char** envp);
 noreturn int shim_do_exit(int error_code);
 pid_t shim_do_wait4(pid_t pid, int* stat_addr, int option, struct __kernel_rusage* ru);
 int shim_do_kill(pid_t pid, int sig);
-int shim_do_uname(struct old_utsname* buf);
+int shim_do_uname(struct new_utsname* buf);
 int shim_do_semget(key_t key, int nsems, int semflg);
 int shim_do_semop(int semid, struct sembuf* sops, unsigned int nsops);
 int shim_do_semctl(int semid, int semnum, int cmd, unsigned long arg);
@@ -454,6 +448,8 @@ int shim_do_sigsuspend(const __sigset_t* mask);
 void* shim_do_arch_prctl(int code, void* addr);
 int shim_do_setrlimit(int resource, struct __kernel_rlimit* rlim);
 int shim_do_chroot(const char* filename);
+long shim_do_sethostname(char* name, int len);
+long shim_do_setdomainname(char* name, int len);
 pid_t shim_do_gettid(void);
 int shim_do_tkill(int pid, int sig);
 time_t shim_do_time(time_t* tloc);
@@ -506,12 +502,6 @@ ssize_t shim_do_sendmmsg(int sockfd, struct mmsghdr* msg, unsigned int vlen, int
 int shim_do_eventfd2(unsigned int count, int flags);
 int shim_do_eventfd(unsigned int count);
 int shim_do_getcpu(unsigned* cpu, unsigned* node, struct getcpu_cache* unused);
-
-/* libos call implementation */
-int shim_do_msgpersist(int msqid, int cmd);
-int shim_do_benchmark_rpc(pid_t pid, int times, const void* buf, size_t size);
-size_t shim_do_send_rpc(pid_t pid, const void* buf, size_t size);
-size_t shim_do_recv_rpc(pid_t* pid, void* buf, size_t size);
 
 #endif /* ! IN_SHIM */
 
@@ -583,7 +573,7 @@ int shim_execve(const char* file, const char** argv, const char** envp);
 int shim_exit(int error_code);
 pid_t shim_wait4(pid_t pid, int* stat_addr, int option, struct __kernel_rusage* ru);
 int shim_kill(pid_t pid, int sig);
-int shim_uname(struct old_utsname* buf);
+int shim_uname(struct new_utsname* buf);
 int shim_semget(key_t key, int nsems, int semflg);
 int shim_semop(int semid, struct sembuf* sops, unsigned int nsops);
 int shim_semctl(int semid, int semnum, int cmd, unsigned long arg);
@@ -692,8 +682,8 @@ int shim_umount2(const char* target, int flags);
 int shim_swapon(const char* specialfile, int swap_flags);
 int shim_swapoff(const char* specialfile);
 int shim_reboot(int magic1, int magic2, int cmd, void* arg);
-int shim_sethostname(char* name, int len);
-int shim_setdomainname(char* name, int len);
+long shim_sethostname(char* name, int len);
+long shim_setdomainname(char* name, int len);
 int shim_iopl(int level);
 int shim_ioperm(unsigned long from, unsigned long num, int on);
 int shim_create_module(const char* name, size_t size);
@@ -835,11 +825,5 @@ int shim_prlimit64(pid_t pid, int resource, const struct __kernel_rlimit64* new_
                    struct __kernel_rlimit64* old_rlim);
 ssize_t shim_sendmmsg(int sockfd, struct mmsghdr* msg, unsigned int vlen, int flags);
 int shim_getcpu(unsigned* cpu, unsigned* node, struct getcpu_cache* unused);
-
-/* libos call wrappers */
-int shim_msgpersist(int msqid, int cmd);
-int shim_benchmark_rpc(pid_t pid, int times, const void* buf, size_t size);
-size_t shim_send_rpc(pid_t pid, const void* buf, size_t size);
-size_t shim_recv_rpc(pid_t* pid, void* buf, size_t size);
 
 #endif /* _SHIM_TABLE_H_ */

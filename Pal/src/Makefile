@@ -1,4 +1,3 @@
-export PAL_DIR = $(CURDIR)
 export RUNTIME_DIR = $(CURDIR)/../../Runtime
 
 include ../../Scripts/Makefile.configs
@@ -40,8 +39,7 @@ PAL_HOST_MACRO = $(shell echo $(PAL_HOST) | tr '[:lower:]' '[:upper:]' | tr '-' 
 files_to_build = $(pal_lib) $(pal_lib_post) $(pal_static) \
 		 $(pal_loader)
 
-defs	= -DIN_PAL -DHOST_TYPE="$(PAL_HOST)" -D$(PAL_HOST_MACRO) -DPAL_DIR=$(PAL_DIR) \
-	  -DRUNTIME_DIR=$(RUNTIME_DIR)
+defs	= -DIN_PAL -DHOST_TYPE="$(PAL_HOST)" -D$(PAL_HOST_MACRO)
 CFLAGS += $(defs)
 objs = \
 	db_events.o \
@@ -107,7 +105,7 @@ $(pal_loader): $(host_lib)
 
 ifneq ($(pal_loader),)
 $(runtime_loader): $(pal_loader)
-	$(call cmd,ln_sf)
+	$(call cmd,ln_sfr)
 endif
 
 ifneq ($(pal_lib),)
@@ -116,12 +114,12 @@ $(pal_lib): $(addprefix $(OBJ_DIR)/,$(objs)) \
 	$(call cmd,ld_so_o)
 
 $(runtime_lib): $(pal_lib)
-	$(call cmd,ln_sf)
+	$(call cmd,ln_sfr)
 endif
 
 ifneq ($(pal_gdb),)
 $(runtime_gdb): $(pal_gdb)
-	$(call cmd,ln_sf)
+	$(call cmd,ln_sfr)
 endif
 
 ifneq ($(pal_lib_post),)

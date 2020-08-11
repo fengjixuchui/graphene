@@ -78,17 +78,16 @@ static long sgx_ocall_exit(void* pms)
     return 0;
 }
 
-static long sgx_ocall_mmap_untrusted(void * pms)
-{
-    ms_ocall_mmap_untrusted_t * ms = (ms_ocall_mmap_untrusted_t *) pms;
-    void * addr;
+static long sgx_ocall_mmap_untrusted(void* pms) {
+    ms_ocall_mmap_untrusted_t* ms = (ms_ocall_mmap_untrusted_t*)pms;
+    void* addr;
 
     ODEBUG(OCALL_MMAP_UNTRUSTED, ms);
-    addr = (void *) INLINE_SYSCALL(mmap, 6, NULL, ms->ms_size,
-                                   ms->ms_prot,
-                                   (ms->ms_fd == -1) ? MAP_ANONYMOUS | MAP_PRIVATE
-                                                     : MAP_FILE | MAP_SHARED,
-                                   ms->ms_fd, ms->ms_offset);
+    addr = (void*)INLINE_SYSCALL(mmap, 6, NULL, ms->ms_size,
+                                 ms->ms_prot,
+                                 (ms->ms_fd == -1) ? MAP_ANONYMOUS | MAP_PRIVATE
+                                                   : MAP_FILE | MAP_SHARED,
+                                 ms->ms_fd, ms->ms_offset);
     if (IS_ERR_P(addr))
         return -ERRNO_P(addr);
 
@@ -96,9 +95,8 @@ static long sgx_ocall_mmap_untrusted(void * pms)
     return 0;
 }
 
-static long sgx_ocall_munmap_untrusted(void * pms)
-{
-    ms_ocall_munmap_untrusted_t * ms = (ms_ocall_munmap_untrusted_t *) pms;
+static long sgx_ocall_munmap_untrusted(void* pms) {
+    ms_ocall_munmap_untrusted_t* ms = (ms_ocall_munmap_untrusted_t*)pms;
     ODEBUG(OCALL_MUNMAP_UNTRUSTED, ms);
     INLINE_SYSCALL(munmap, 2, ALLOC_ALIGN_DOWN_PTR(ms->ms_mem),
                    ALLOC_ALIGN_UP_PTR(ms->ms_mem + ms->ms_size) -
@@ -250,12 +248,12 @@ static long sgx_ocall_mkdir(void * pms)
     return ret;
 }
 
-static long sgx_ocall_getdents(void * pms)
-{
-    ms_ocall_getdents_t * ms = (ms_ocall_getdents_t *) pms;
+static long sgx_ocall_getdents(void* pms) {
+    ms_ocall_getdents_t* ms = (ms_ocall_getdents_t*)pms;
     long ret;
     ODEBUG(OCALL_GETDENTS, ms);
-    ret = INLINE_SYSCALL(getdents64, 3, ms->ms_fd, ms->ms_dirp, ms->ms_size);
+    unsigned int count = ms->ms_size <= UINT_MAX ? ms->ms_size : UINT_MAX;
+    ret = INLINE_SYSCALL(getdents64, 3, ms->ms_fd, ms->ms_dirp, count);
     return ret;
 }
 
@@ -575,7 +573,7 @@ static long sgx_ocall_gettime(void * pms)
 
 static long sgx_ocall_sleep(void * pms)
 {
-    ms_ocall_sleep_t * ms = (ms_ocall_sleep_t *) pms;
+    ms_ocall_sleep_t* ms = (ms_ocall_sleep_t*)pms;
     long ret;
     ODEBUG(OCALL_SLEEP, ms);
     if (!ms->ms_microsec) {
@@ -583,15 +581,15 @@ static long sgx_ocall_sleep(void * pms)
         return 0;
     }
     struct timespec req, rem;
-    unsigned long microsec = ms->ms_microsec;
-    const unsigned long VERY_LONG_TIME_IN_US = 1000000L * 60 * 60 * 24 * 365 * 128;
+    uint64_t microsec = ms->ms_microsec;
+    const uint64_t VERY_LONG_TIME_IN_US = (uint64_t)1000000 * 60 * 60 * 24 * 365 * 128;
     if (ms->ms_microsec > VERY_LONG_TIME_IN_US) {
         /* avoid overflow with time_t */
         req.tv_sec  = VERY_LONG_TIME_IN_US / 1000000;
         req.tv_nsec = 0;
     } else {
         req.tv_sec = ms->ms_microsec / 1000000;
-        req.tv_nsec = (microsec - req.tv_sec * 1000000) * 1000;
+        req.tv_nsec = (microsec - req.tv_sec * (uint64_t)1000000) * 1000;
     }
 
     ret = INLINE_SYSCALL(nanosleep, 2, &req, &rem);
@@ -810,7 +808,7 @@ static int start_rpc(size_t num_of_threads) {
         spinlock_lock(&g_rpc_queue->lock);
         size_t n = g_rpc_queue->rpc_threads_cnt;
         spinlock_unlock(&g_rpc_queue->lock);
-        if (n == pal_enclave.rpc_thread_num)
+        if (n == g_pal_enclave.rpc_thread_num)
             break;
         INLINE_SYSCALL(sched_yield, 0);
     }
@@ -819,12 +817,12 @@ static int start_rpc(size_t num_of_threads) {
 }
 
 
-int ecall_enclave_start (char * args, size_t args_size, char * env, size_t env_size)
-{
+int ecall_enclave_start(char* libpal_uri, char* args, size_t args_size, char* env,
+                        size_t env_size) {
     g_rpc_queue = NULL;
 
-    if (pal_enclave.rpc_thread_num > 0) {
-        int ret = start_rpc(pal_enclave.rpc_thread_num);
+    if (g_pal_enclave.rpc_thread_num > 0) {
+        int ret = start_rpc(g_pal_enclave.rpc_thread_num);
         if (ret < 0) {
             /* failed to create RPC threads */
             return ret;
@@ -833,11 +831,13 @@ int ecall_enclave_start (char * args, size_t args_size, char * env, size_t env_s
     }
 
     ms_ecall_enclave_start_t ms;
+    ms.ms_libpal_uri = libpal_uri;
+    ms.ms_libpal_uri_len = strlen(ms.ms_libpal_uri);
     ms.ms_args = args;
     ms.ms_args_size = args_size;
     ms.ms_env = env;
     ms.ms_env_size = env_size;
-    ms.ms_sec_info = &pal_enclave.pal_sec;
+    ms.ms_sec_info = &g_pal_enclave.pal_sec;
     ms.rpc_queue = g_rpc_queue;
     EDEBUG(ECALL_ENCLAVE_START, &ms);
     return sgx_ecall(ECALL_ENCLAVE_START, &ms);

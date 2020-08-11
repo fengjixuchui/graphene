@@ -14,7 +14,6 @@ GLIBC_LIBS = \
 	dlfcn/libdl.so.2 \
 	libc.so \
 	libc.so.6 \
-	libos/liblibos.so.1 \
 	login/libutil.so.1 \
 	math/libm.so.6 \
 	nptl/libpthread.so.0 \
@@ -65,7 +64,7 @@ $(BUILD_DIR)/Makefile: $(GLIBC_SRC)/configure
 
 define LN_SF_TO_RUNTIME_DIR_template =
 $(RUNTIME_DIR)/$(notdir $(1)): $(1)
-	$$(call cmd,ln_sf)
+	$$(call cmd,ln_sfr)
 endef
 
 $(foreach lib,$(GLIBC_TARGET),$(eval $(call LN_SF_TO_RUNTIME_DIR_template,$(lib))))
@@ -76,8 +75,7 @@ GLIBC_MIRRORS ?= https://ftp.gnu.org/gnu/ \
 
 GLIBC_PATCHES = \
 	glibc-patches/$(GLIBC_SRC).patch \
-	glibc-patches/syscalldb-api.patch \
-	glibc-patches/liblibos.patch
+	glibc-patches/syscalldb-api.patch
 
 GLIBC_PATCHES_2.23 = \
 	glibc-patches/hp-timing-2.23.patch \

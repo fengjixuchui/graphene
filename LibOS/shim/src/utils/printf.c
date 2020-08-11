@@ -103,12 +103,26 @@ void debug_setprefix(shim_tcb_t* tcb) {
     struct debug_buf* buf = tcb->debug_buf;
     buf->start = buf->end = 0;
 
-    if (tcb->tid && !is_internal_tid(tcb->tid))
-        fprintfmt(debug_fputch, NULL, buf, TID_PREFIX, tcb->tid);
-    else if (cur_process.vmid)
-        fprintfmt(debug_fputch, NULL, buf, VMID_PREFIX, cur_process.vmid & 0xFFFF);
-    else
-        fprintfmt(debug_fputch, NULL, buf, NOID_PREFIX);
+    const char* exec = PAL_CB(executable);
+    for (const char* it = exec; *it; it++)
+        if (*it == ':' || *it == '/')
+            exec = it + 1;
+
+    uint32_t vmid = cur_process.vmid & 0xFFFF;
+    if (tcb->tid && !is_internal_tid(tcb->tid)) {
+        /* normal app thread: show Process ID, Thread ID, and exec name */
+        fprintfmt(debug_fputch, NULL, buf, "[P%u:T%u:%s] ", vmid, tcb->tid, exec);
+    } else if (tcb->tid) {
+        /* internal LibOS thread: show Process ID, Internal-thread ID, and exec name */
+        fprintfmt(debug_fputch, NULL, buf, "[P%u:i%u:%s] ", vmid, tcb->tid - INTERNAL_TID_BASE,
+                  exec);
+    } else if (cur_process.vmid) {
+        /* unknown thread (happens on process init): show Process ID and exec name */
+        fprintfmt(debug_fputch, NULL, buf, "[P%u:%s] ", vmid, exec);
+    } else {
+        /* unknown process (must never happen): show exec name */
+        fprintfmt(debug_fputch, NULL, buf, "[%s] ", exec);
+    }
 
     buf->start = buf->end;
 }

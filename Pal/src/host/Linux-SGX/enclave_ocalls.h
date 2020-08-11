@@ -46,7 +46,7 @@ int ocall_ftruncate (int fd, uint64_t length);
 
 int ocall_mkdir (const char *pathname, unsigned short mode);
 
-int ocall_getdents (int fd, struct linux_dirent64 *dirp, unsigned int size);
+int ocall_getdents(int fd, struct linux_dirent64* dirp, size_t size);
 
 int ocall_listen(int domain, int type, int protocol, int ipv6_v6only, struct sockaddr* addr,
                  size_t* addrlen, struct sockopt* sockopt);
@@ -77,7 +77,7 @@ int ocall_futex(uint32_t *uaddr, int op, int val, int64_t timeout_us);
 
 int ocall_gettime(uint64_t* microsec);
 
-int ocall_sleep (unsigned long * microsec);
+int ocall_sleep(uint64_t* microsec);
 
 int ocall_socketpair (int domain, int type, int protocol, int sockfds[2]);
 

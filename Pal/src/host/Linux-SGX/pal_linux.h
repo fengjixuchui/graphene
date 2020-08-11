@@ -25,8 +25,6 @@
 
 #include "sysdep-arch.h"
 
-#define ENCLAVE_PAL_FILENAME RUNTIME_FILE("libpal-Linux-SGX.so")
-
 #define IS_ERR INTERNAL_SYSCALL_ERROR
 #define IS_ERR_P INTERNAL_SYSCALL_ERROR_P
 #define ERRNO INTERNAL_SYSCALL_ERRNO
@@ -65,9 +63,10 @@ int init_child_process(PAL_HANDLE* parent);
 #ifdef IN_ENCLAVE
 
 struct pal_sec;
-void pal_linux_main(char * uptr_args, size_t args_size,
-                    char * uptr_env, size_t env_size,
-                    struct pal_sec * uptr_sec_info);
+noreturn void pal_linux_main(char* uptr_libpal_uri, size_t libpal_uri_len,
+                             char* uptr_args, size_t args_size,
+                             char* uptr_env, size_t env_size,
+                             struct pal_sec* uptr_sec_info);
 void pal_start_thread (void);
 
 struct link_map;
@@ -93,11 +92,11 @@ extern char __text_start, __text_end, __data_start, __data_end;
 typedef struct { char bytes[32]; } sgx_checksum_t;
 typedef struct { char bytes[16]; } sgx_stub_t;
 
-extern int xsave_enabled;
-extern uint64_t xsave_features;
-extern uint32_t xsave_size;
+extern int g_xsave_enabled;
+extern uint64_t g_xsave_features;
+extern uint32_t g_xsave_size;
 #define XSAVE_RESET_STATE_SIZE (512 + 64)  // 512 for legacy regs, 64 for xsave header
-extern const uint32_t xsave_reset_state[];
+extern const uint32_t g_xsave_reset_state[];
 
 void init_xsave_size(uint64_t xfrm);
 void save_xregs(PAL_XREGS_STATE* xsave_area);
@@ -285,12 +284,6 @@ int _DkStreamSecureSave(LIB_SSL_CONTEXT* ssl_ctx, const uint8_t** obuf, size_t* 
 
 #define PAL_ENCLAVE_INITIALIZED     0x0001ULL
 
-extern struct pal_enclave_config {
-    sgx_measurement_t mr_enclave;
-    sgx_attributes_t  enclave_attributes;
-    void *            enclave_key;
-} pal_enclave_config;
-
 #include <hex.h>
 
 #else
@@ -303,7 +296,7 @@ int sgx_create_process(const char* uri, int nargs, const char** args, int* strea
 # endif
 
 # define ARCH_VFORK()                                                       \
-    (pal_enclave.pal_sec.in_gdb ?                                           \
+    (g_pal_enclave.pal_sec.in_gdb ?                                         \
      INLINE_SYSCALL(clone, 4, CLONE_VM|CLONE_VFORK|SIGCHLD, 0, NULL, NULL) :\
      INLINE_SYSCALL(clone, 4, CLONE_VM|CLONE_VFORK, 0, NULL, NULL))
 #else

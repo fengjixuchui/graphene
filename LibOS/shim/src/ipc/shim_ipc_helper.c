@@ -59,8 +59,6 @@ static ipc_callback ipc_callbacks[IPC_CODE_NUM] = {
     /* PID_RETSTATUS    */ &ipc_pid_retstatus_callback,
     /* PID_GETMETA      */ &ipc_pid_getmeta_callback,
     /* PID_RETMETA      */ &ipc_pid_retmeta_callback,
-    /* PID_NOP          */ &ipc_pid_nop_callback,
-    /* PID_SENDRPC      */ &ipc_pid_sendrpc_callback,
 
     /* sysv namespace */
     IPC_NS_CALLBACKS(sysv)
@@ -69,11 +67,9 @@ static ipc_callback ipc_callbacks[IPC_CODE_NUM] = {
     /* SYSV_MOVRES      */ &ipc_sysv_movres_callback,
     /* SYSV_MSGSND      */ &ipc_sysv_msgsnd_callback,
     /* SYSV_MSGRCV      */ &ipc_sysv_msgrcv_callback,
-    /* SYSV_MSGMOV      */ &ipc_sysv_msgmov_callback,
     /* SYSV_SEMOP       */ &ipc_sysv_semop_callback,
     /* SYSV_SEMCTL      */ &ipc_sysv_semctl_callback,
     /* SYSV_SEMRET      */ &ipc_sysv_semret_callback,
-    /* SYSV_SEMMOV      */ &ipc_sysv_semmov_callback,
 };
 
 static int init_self_ipc_port(void) {
@@ -295,8 +291,8 @@ static void __del_ipc_port(struct shim_ipc_port* port) {
 
     /* Check for pending messages on port (threads might be blocking for responses) */
     lock(&port->msgs_lock);
-    struct shim_ipc_msg_duplex* msg;
-    struct shim_ipc_msg_duplex* tmp;
+    struct shim_ipc_msg_with_ack* msg;
+    struct shim_ipc_msg_with_ack* tmp;
     LISTP_FOR_EACH_ENTRY_SAFE(msg, tmp, &port->msgs, list) {
         LISTP_DEL_INIT(msg, &port->msgs, list);
         msg->retval = -ECONNRESET;
@@ -508,7 +504,7 @@ static int ipc_resp_callback(struct shim_ipc_msg* msg, struct shim_ipc_port* por
         return resp->retval;
 
     /* find a corresponding request msg for this response msg */
-    struct shim_ipc_msg_duplex* req_msg = pop_ipc_msg_duplex(port, msg->seq);
+    struct shim_ipc_msg_with_ack* req_msg = pop_ipc_msg_with_ack(port, msg->seq);
 
     /* if some thread is waiting for response, wake it with response retval */
     if (req_msg) {

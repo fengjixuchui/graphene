@@ -348,13 +348,8 @@ int init_child_process (PAL_HANDLE * parent_handle)
     return 0;
 }
 
-void print_alloced_pages (void);
-
 noreturn void _DkProcessExit (int exitcode)
 {
-#if PRINT_ENCLAVE_STAT
-    print_alloced_pages();
-#endif
     if (exitcode)
         SGX_DBG(DBG_I, "DkProcessExit: Returning exit code %d\n", exitcode);
     ocall_exit(exitcode, /*is_exitgroup=*/true);
@@ -497,11 +492,11 @@ static int proc_attrsetbyhdl (PAL_HANDLE handle, PAL_STREAM_ATTR * attr)
     return 0;
 }
 
-struct handle_ops proc_ops = {
-        .read           = &proc_read,
-        .write          = &proc_write,
-        .close          = &proc_close,
-        .delete         = &proc_delete,
-        .attrquerybyhdl = &proc_attrquerybyhdl,
-        .attrsetbyhdl   = &proc_attrsetbyhdl,
-    };
+struct handle_ops g_proc_ops = {
+    .read           = &proc_read,
+    .write          = &proc_write,
+    .close          = &proc_close,
+    .delete         = &proc_delete,
+    .attrquerybyhdl = &proc_attrquerybyhdl,
+    .attrsetbyhdl   = &proc_attrsetbyhdl,
+};

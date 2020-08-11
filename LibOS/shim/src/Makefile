@@ -75,7 +75,6 @@ objs = \
 	ipc/shim_ipc_sysv.o \
 	sys/shim_access.o \
 	sys/shim_alarm.o \
-	sys/shim_benchmark.o \
 	sys/shim_brk.o \
 	sys/shim_clone.o \
 	sys/shim_dup.o \
@@ -126,7 +125,7 @@ all:
 endif
 
 $(files_to_install): $(RUNTIME_DIR)/%: %
-	$(call cmd,ln_sf)
+	$(call cmd,ln_sfr)
 
 LDFLAGS-libsysdb.so += --version-script shim.map -T shim-$(ARCH).lds
 libsysdb.so: $(objs) $(filter %.map %.lds,$(LDFLAGS-$@)) \
