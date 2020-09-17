@@ -8,11 +8,11 @@
 #ifndef _SHIM_UTILS_H_
 #define _SHIM_UTILS_H_
 
-#include <api.h>
-#include <list.h>
-#include <pal.h>
-#include <shim_handle.h>
-#include <shim_internal.h>
+#include "api.h"
+#include "list.h"
+#include "pal.h"
+#include "shim_handle.h"
+#include "shim_internal.h"
 
 struct shim_handle;
 
@@ -138,54 +138,12 @@ static inline int qstrcmpstr(const struct shim_qstr* qstr, const char* str, size
     return memcmp(qstrgetstr(qstr), str, size);
 }
 
-//#define SLAB_DEBUG_PRINT
-//#define SLAB_DEBUG_TRACE
-
 /* heap allocation functions */
 int init_slab(void);
 
-#if defined(SLAB_DEBUG_PRINT) || defined(SLAB_DEBUG_TRACE)
-void* __malloc_debug(size_t size, const char* file, int line);
-#define malloc(size) __malloc_debug(size, __FILE__, __LINE__)
-void __free_debug(void* mem, const char* file, int line);
-#define free(mem) __free_debug(mem, __FILE__, __LINE__)
-void* __malloc_copy_debug(const void* mem, size_t size, const char* file, int line);
-#define malloc_copy(mem, size) __malloc_copy_debug(mem, size, __FILE__, __LINE__)
-#else
 void* malloc(size_t size);
 void free(void* mem);
 void* malloc_copy(const void* mem, size_t size);
-#endif
-
-static inline __attribute__((always_inline)) char* qstrtostr(struct shim_qstr* qstr, bool on_stack) {
-    int len   = qstr->len;
-    char* buf = on_stack ? __alloca(len + 1) : malloc(len + 1);
-
-    if (!buf)
-        return NULL;
-
-    memcpy(buf, qstrgetstr(qstr), len);
-
-    buf[len] = 0;
-    return buf;
-}
-
-/* typedef a 32 bit type */
-#ifndef UINT4
-#define UINT4 uint32_t
-#endif
-
-/* Data structure for MD5 (Message Digest) computation */
-struct shim_md5_ctx {
-    UINT4 i[2];               /* number of _bits_ handled mod 2^64 */
-    UINT4 buf[4];             /* scratch buffer */
-    unsigned char in[64];     /* input buffer */
-    unsigned char digest[16]; /* actual digest after MD5Final call */
-};
-
-void md5_init(struct shim_md5_ctx* mdContext);
-void md5_update(struct shim_md5_ctx* mdContext, const void* buf, size_t len);
-void md5_final(struct shim_md5_ctx* mdContext);
 
 /* prompt user for confirmation */
 int message_confirm(const char* message, const char* options);

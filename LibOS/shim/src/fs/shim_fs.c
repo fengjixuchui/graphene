@@ -2,21 +2,19 @@
 /* Copyright (C) 2014 Stony Brook University */
 
 /*
- * shim_fs.c
- *
- * This file contains codes for creating filesystems in library OS.
+ * This file contains code for creating filesystems in library OS.
  */
 
 #include <linux/fcntl.h>
 
-#include <list.h>
-#include <pal.h>
-#include <pal_debug.h>
-#include <pal_error.h>
-#include <shim_checkpoint.h>
-#include <shim_fs.h>
-#include <shim_internal.h>
-#include <shim_utils.h>
+#include "list.h"
+#include "pal.h"
+#include "pal_debug.h"
+#include "pal_error.h"
+#include "shim_checkpoint.h"
+#include "shim_fs.h"
+#include "shim_internal.h"
+#include "shim_utils.h"
 
 struct shim_fs {
     char name[8];
@@ -60,7 +58,7 @@ static struct shim_lock mount_mgr_lock;
 #define MOUNT_MGR_ALLOC 64
 
 #define OBJ_TYPE struct shim_mount
-#include <memmgr.h>
+#include "memmgr.h"
 
 static MEM_MGR mount_mgr = NULL;
 DEFINE_LISTP(shim_mount);
@@ -195,8 +193,8 @@ static int __mount_others(void) {
     if (nkeys <= 0)
         goto out;
 
-    const char *key = keybuf;
-    const char *next = NULL;
+    const char* key  = keybuf;
+    const char* next = NULL;
     for (int n = 0; n < nkeys; key = next, n++) {
         for (next = key; *next; next++)
             ;
@@ -408,7 +406,7 @@ int mount_fs(const char* type, const char* uri, const char* mount_point, struct 
     if (parent && last_len > 0) {
         /* Newly created dentry's relative path will be a concatenation of parent
          * + last strings (see get_new_dentry), make sure it fits into qstr */
-        if (parent->rel_path.len + 1 + last_len >= STR_SIZE) {  /* +1 for '/' */
+        if (parent->rel_path.len + 1 + last_len >= STR_SIZE) { /* +1 for '/' */
             debug("Relative path exceeds the limit %d\n", STR_SIZE);
             ret = -ENAMETOOLONG;
             goto out_with_unlock;
@@ -482,12 +480,20 @@ out:
     return ret;
 }
 
+/*
+ * XXX: These two functions are useless - `mount` is not freed even if refcount reaches 0.
+ * Unfortunately Graphene is not keeping track of this refcount correctly, so we cannot free
+ * the object. Fixing this would require revising whole filesystem implementation - but this code
+ * is, uhm, not the best achievement of humankind and probably requires a complete rewrite.
+ */
 void get_mount(struct shim_mount* mount) {
-    REF_INC(mount->ref_count);
+    __UNUSED(mount);
+    // REF_INC(mount->ref_count);
 }
 
 void put_mount(struct shim_mount* mount) {
-    REF_DEC(mount->ref_count);
+    __UNUSED(mount);
+    // REF_DEC(mount->ref_count);
 }
 
 int walk_mounts(int (*walk)(struct shim_mount* mount, void* arg), void* arg) {
@@ -562,16 +568,16 @@ BEGIN_CP_FUNC(mount) {
         *new_mount = *mount;
 
         if (mount->cpdata) {
-            struct shim_mem_entry* entry;
-            DO_CP_SIZE(memory, mount->cpdata, mount->cpsize, &entry);
-            new_mount->cpdata = NULL;
-            entry->paddr = &new_mount->cpdata;
+            size_t cp_off = ADD_CP_OFFSET(mount->cpsize);
+            memcpy((char*)base + cp_off, mount->cpdata, mount->cpsize);
+            new_mount->cpdata = (char*)base + cp_off;
         }
 
         new_mount->data        = NULL;
         new_mount->mount_point = NULL;
         new_mount->root        = NULL;
         INIT_LIST_HEAD(new_mount, list);
+        REF_SET(new_mount->ref_count, 0);
 
         DO_CP_IN_MEMBER(qstr, new_mount, path);
         DO_CP_IN_MEMBER(qstr, new_mount, uri);
@@ -600,6 +606,14 @@ BEGIN_RS_FUNC(mount) {
     CP_REBASE(mount->list);
     CP_REBASE(mount->mount_point);
     CP_REBASE(mount->root);
+
+    if (mount->mount_point) {
+        get_dentry(mount->mount_point);
+    }
+
+    if (mount->root) {
+        get_dentry(mount->root);
+    }
 
     struct shim_fs* fs = find_fs(mount->type);
 
@@ -655,4 +669,71 @@ const char* get_file_name(const char* path, size_t len) {
     while (c > path && *c != '/')
         c--;
     return *c == '/' ? c + 1 : c;
+}
+
+size_t dentry_get_path_size(struct shim_dentry* dent) {
+    size_t size = 0;
+    bool slash = false;
+
+    if (dent->fs && dent->fs->path.len) {
+        size += dent->fs->path.len;
+        slash = qstrgetstr(&dent->fs->path)[dent->fs->path.len - 1] == '/';
+    }
+
+    if (dent->rel_path.len) {
+        const char* path = qstrgetstr(&dent->rel_path);
+        size_t len = dent->rel_path.len;
+
+        // Ensure exactly 1 slash (see dentry_get_path())
+        if (slash && *path == '/')
+            size += len - 1;
+        else if (!slash && *path != '/')
+            size += len + 1;
+        else
+            size += len;
+    }
+
+    // 1 for null terminator
+    size++;
+
+    return size;
+}
+
+char* dentry_get_path(struct shim_dentry* dent, char* buffer) {
+    struct shim_mount* fs = dent->fs;
+    bool slash = false;
+    char* c;
+
+    assert(buffer);
+    c = buffer;
+
+    if (fs && fs->path.len) {
+        memcpy(c, qstrgetstr(&fs->path), fs->path.len);
+        c += fs->path.len;
+
+        slash = *(c - 1) == '/';
+    }
+
+    if (dent->rel_path.len) {
+        const char* path = qstrgetstr(&dent->rel_path);
+        size_t len = dent->rel_path.len;
+
+        // Ensure there is exactly 1 slash between fs path and rel_path.
+        if (slash && *path == '/') {
+            memcpy(c, path + 1, len - 1);
+            c += len - 1;
+        } else if (!slash && *path != '/') {
+            *c = '/';
+            memcpy(c + 1, path, len);
+            c += len + 1;
+        } else {
+            memcpy(c, path, len);
+            c += len;
+        }
+    }
+
+    assert(c - buffer == (ssize_t)(dentry_get_path_size(dent) - 1));
+
+    *c = 0;
+    return buffer;
 }

@@ -192,8 +192,8 @@ static ssize_t inet_translate_addr(int domain, char* uri, size_t count, struct a
     if (domain == AF_INET6) {
         unsigned short* ad = (void*)&addr->addr.v6.s6_addr;
         return snprintf(uri, count, "[%04x:%04x:%x:%04x:%04x:%04x:%04x:%04x]:%u", __ntohs(ad[0]),
-                     __ntohs(ad[1]), __ntohs(ad[2]), __ntohs(ad[3]), __ntohs(ad[4]), __ntohs(ad[5]),
-                     __ntohs(ad[6]), __ntohs(ad[7]), addr->ext_port);
+                        __ntohs(ad[1]), __ntohs(ad[2]), __ntohs(ad[3]), __ntohs(ad[4]),
+                        __ntohs(ad[5]), __ntohs(ad[6]), __ntohs(ad[7]), addr->ext_port);
     }
 
     return -EPROTONOSUPPORT;
@@ -294,9 +294,18 @@ static ssize_t inet_create_uri(int domain, char* uri, size_t count, int sock_typ
 static inline void unix_copy_addr(struct sockaddr* saddr, struct shim_dentry* dent) {
     struct sockaddr_un* un = (struct sockaddr_un*)saddr;
     un->sun_family         = AF_UNIX;
-    size_t size;
-    const char* path = dentry_get_path(dent, true, &size);
-    memcpy(un->sun_path, path, size + 1);
+    size_t size = dentry_get_path_size(dent);
+    char path[size];
+
+    dentry_get_path(dent, path);
+
+    if (size > ARRAY_SIZE(un->sun_path)) {
+        debug("unix_copy_addr(): path too long, truncating: %s\n", path);
+        memcpy(un->sun_path, path, ARRAY_SIZE(un->sun_path) - 1);
+        un->sun_path[ARRAY_SIZE(un->sun_path) - 1] = 0;
+    } else {
+        memcpy(un->sun_path, path, size);
+    }
 }
 
 static int inet_check_addr(int domain, struct sockaddr* addr, size_t addrlen) {
@@ -327,26 +336,26 @@ static size_t inet_copy_addr(int domain, struct sockaddr* saddr, size_t saddr_le
     size_t len = 0;
 
     switch (domain) {
-      case AF_INET:
-        in = (struct sockaddr_in*)&ss;
-        in->sin_family         = AF_INET;
-        in->sin_port           = __htons(addr->port);
-        in->sin_addr           = addr->addr.v4;
+        case AF_INET:
+            in = (struct sockaddr_in*)&ss;
+            in->sin_family = AF_INET;
+            in->sin_port   = __htons(addr->port);
+            in->sin_addr   = addr->addr.v4;
 
-        len = MIN(saddr_len, sizeof(struct sockaddr_in));
-        break;
+            len = MIN(saddr_len, sizeof(struct sockaddr_in));
+            break;
 
-      case AF_INET6:
-        in6 = (struct sockaddr_in6*)&ss;
-        in6->sin6_family         = AF_INET6;
-        in6->sin6_port           = __htons(addr->port);
-        in6->sin6_addr           = addr->addr.v6;
+        case AF_INET6:
+            in6 = (struct sockaddr_in6*)&ss;
+            in6->sin6_family = AF_INET6;
+            in6->sin6_port   = __htons(addr->port);
+            in6->sin6_addr   = addr->addr.v6;
 
-        len = MIN(saddr_len, sizeof(struct sockaddr_in6));
-        break;
+            len = MIN(saddr_len, sizeof(struct sockaddr_in6));
+            break;
 
-      default:
-        __abort(); /* this function must accept only AF_INET/AF_INET6 */
+        default:
+            __abort(); /* this function must accept only AF_INET/AF_INET6 */
     }
 
     memcpy(saddr, &ss, len);
@@ -364,8 +373,8 @@ static void inet_save_addr(int domain, struct addr_inet* addr, const struct sock
 
     if (domain == AF_INET6) {
         if (saddr->sa_family == AF_INET) {
-            const struct sockaddr_in* in           = (const struct sockaddr_in*)saddr;
-            addr->port                             = __ntohs(in->sin_port);
+            const struct sockaddr_in* in = (const struct sockaddr_in*)saddr;
+            addr->port                 = __ntohs(in->sin_port);
             addr->addr.v6.s6_addr32[0] = __htonl(0);
             addr->addr.v6.s6_addr32[1] = __htonl(0);
             addr->addr.v6.s6_addr32[2] = __htonl(0x0000ffff);
@@ -373,8 +382,8 @@ static void inet_save_addr(int domain, struct addr_inet* addr, const struct sock
             addr->addr.v6.s6_addr32[3] = in->sin_addr.s_addr;
         } else {
             const struct sockaddr_in6* in6 = (const struct sockaddr_in6*)saddr;
-            addr->port                     = __ntohs(in6->sin6_port);
-            addr->addr.v6                  = in6->sin6_addr;
+            addr->port    = __ntohs(in6->sin6_port);
+            addr->addr.v6 = in6->sin6_addr;
         }
         return;
     }
@@ -449,7 +458,6 @@ static int hash_to_hex_string(HASHTYPE hash, char* buf, size_t size) {
     return 0;
 }
 
-
 int shim_do_bind(int sockfd, struct sockaddr* addr, int _addrlen) {
     if (_addrlen < 0)
         return -EINVAL;
@@ -458,7 +466,7 @@ int shim_do_bind(int sockfd, struct sockaddr* addr, int _addrlen) {
         return -EFAULT;
 
     struct shim_handle* hdl = get_fd_handle(sockfd, NULL, NULL);
-    int ret                 = -EINVAL;
+    int ret = -EINVAL;
     if (!hdl)
         return -EBADF;
 
@@ -719,7 +727,7 @@ int shim_do_connect(int sockfd, struct sockaddr* addr, int _addrlen) {
     struct shim_sock_handle* sock = &hdl->info.sock;
     lock(&hdl->lock);
     enum shim_sock_state state = sock->sock_state;
-    int ret                    = -EINVAL;
+    int ret = -EINVAL;
 
     if (state == SOCK_CONNECTED) {
         if (addr->sa_family == AF_UNSPEC) {
@@ -1004,9 +1012,6 @@ int shim_do_accept4(int fd, struct sockaddr* addr, int* addrlen, int flags) {
 
 static ssize_t do_sendmsg(int fd, struct iovec* bufs, int nbufs, int flags,
                           const struct sockaddr* addr, int addrlen) {
-    // Issue #752 - https://github.com/oscarlab/graphene/issues/752
-    __UNUSED(flags);
-
     struct shim_handle* hdl = get_fd_handle(fd, NULL, NULL);
     if (!hdl)
         return -EBADF;
@@ -1029,7 +1034,22 @@ static ssize_t do_sendmsg(int fd, struct iovec* bufs, int nbufs, int flags,
             goto out;
     }
 
+    if (flags & ~(MSG_NOSIGNAL | MSG_DONTWAIT)) {
+        debug("sendmsg()/sendmmsg()/sendto(): unknown flag (only MSG_NOSIGNAL and MSG_DONTWAIT"
+              " are supported).\n");
+        ret = -EOPNOTSUPP;
+        goto out;
+    }
+
     lock(&hdl->lock);
+
+    if (flags & MSG_DONTWAIT) {
+        if (!(hdl->flags & O_NONBLOCK)) {
+            debug("Warning: MSG_DONTWAIT on blocking socket is ignored, may lead to a write that"
+                  " unexpectedly blocks.\n");
+        }
+        flags &= ~MSG_DONTWAIT;
+    }
 
     PAL_HANDLE pal_hdl = hdl->pal_handle;
     char* uri          = NULL;
@@ -1085,9 +1105,7 @@ static ssize_t do_sendmsg(int fd, struct iovec* bufs, int nbufs, int flags,
         inet_rebase_port(false, sock->domain, &addr_buf, false);
         size_t prefix_len = static_strlen(URI_PREFIX_UDP);
         memcpy(uri, URI_PREFIX_UDP, prefix_len + 1);
-        if ((ret = inet_translate_addr(sock->domain,
-                                       uri + prefix_len,
-                                       SOCK_URI_SIZE - prefix_len,
+        if ((ret = inet_translate_addr(sock->domain, uri + prefix_len, SOCK_URI_SIZE - prefix_len,
                                        &addr_buf)) < 0) {
             lock(&hdl->lock);
             goto out_locked;
@@ -1097,13 +1115,13 @@ static ssize_t do_sendmsg(int fd, struct iovec* bufs, int nbufs, int flags,
     }
 
     int bytes = 0;
-    ret       = 0;
+    ret = 0;
 
     for (int i = 0; i < nbufs; i++) {
         PAL_NUM pal_ret = DkStreamWrite(pal_hdl, 0, bufs[i].iov_len, bufs[i].iov_base, uri);
 
         if (pal_ret == PAL_STREAM_ERROR) {
-            if (PAL_ERRNO() == EPIPE) {
+            if (PAL_ERRNO() == EPIPE && !(flags & MSG_NOSIGNAL)) {
                 struct shim_thread* cur = get_cur_thread();
                 assert(cur);
                 (void)do_kill_proc(cur->tid, cur->tgid, SIGPIPE, /*use_ipc=*/false);
@@ -1213,13 +1231,23 @@ static ssize_t do_recvmsg(int fd, struct iovec* bufs, size_t nbufs, int flags,
         expected_size += bufs[i].iov_len;
     }
 
-    if (flags & ~MSG_PEEK) {
-        debug("recvmsg()/recvmmsg()/recvfrom(): unknown flag (only MSG_PEEK is supported).\n");
+    if (flags & ~(MSG_PEEK | MSG_DONTWAIT)) {
+        debug("recvmsg()/recvmmsg()/recvfrom(): unknown flag (only MSG_PEEK and MSG_DONTWAIT are"
+              " supported).\n");
         ret = -EOPNOTSUPP;
         goto out;
     }
 
     lock(&hdl->lock);
+
+    if (flags & MSG_DONTWAIT) {
+        if (!(hdl->flags & O_NONBLOCK)) {
+            debug("Warning: MSG_DONTWAIT on blocking socket is ignored, may lead to a read that"
+                  " unexpectedly blocks.\n");
+        }
+        flags &= ~MSG_DONTWAIT;
+    }
+
     peek_buffer        = sock->peek_buffer;
     sock->peek_buffer  = NULL;
     PAL_HANDLE pal_hdl = hdl->pal_handle;
@@ -1309,10 +1337,12 @@ static ssize_t do_recvmsg(int fd, struct iovec* bufs, size_t nbufs, int flags,
             /* some data left to read from peek buffer */
             assert(total_bytes < peek_buffer->end - peek_buffer->start);
             iov_bytes = MIN(bufs[i].iov_len, peek_buffer->end - peek_buffer->start - total_bytes);
-            memcpy(bufs[i].iov_base, &peek_buffer->buf[peek_buffer->start + total_bytes], iov_bytes);
+            memcpy(bufs[i].iov_base, &peek_buffer->buf[peek_buffer->start + total_bytes],
+                   iov_bytes);
             uri = peek_buffer->uri;
         } else {
-            PAL_NUM pal_ret = DkStreamRead(pal_hdl, 0, bufs[i].iov_len, bufs[i].iov_base, uri, uri ? SOCK_URI_SIZE : 0);
+            PAL_NUM pal_ret = DkStreamRead(pal_hdl, 0, bufs[i].iov_len, bufs[i].iov_base, uri,
+                                           uri ? SOCK_URI_SIZE : 0);
             if (pal_ret == PAL_STREAM_ERROR) {
                 ret = PAL_NATIVE_ERRNO() == PAL_ERROR_STREAMNOTEXIST
                       ? -ECONNABORTED
@@ -1334,7 +1364,8 @@ static ssize_t do_recvmsg(int fd, struct iovec* bufs, size_t nbufs, int flags,
                 if (uri) {
                     struct addr_inet conn;
 
-                    if ((ret = inet_parse_addr(sock->domain, sock->sock_type, uri, &conn, NULL)) < 0) {
+                    if ((ret = inet_parse_addr(sock->domain, sock->sock_type, uri, &conn, NULL))
+                            < 0) {
                         lock(&hdl->lock);
                         goto out_locked;
                     }
@@ -1592,8 +1623,8 @@ struct __kernel_linger {
 
 static void __populate_addr_with_defaults(PAL_STREAM_ATTR* attr) {
     /* Linux default recv/send buffer sizes for new sockets */
-    attr->socket.receivebuf     = 212992;
-    attr->socket.sendbuf        = 212992;
+    attr->socket.receivebuf = 212992;
+    attr->socket.sendbuf    = 212992;
 
     attr->socket.linger         = 0;
     attr->socket.receivetimeout = 0;
@@ -1969,8 +2000,8 @@ out:
     return ret;
 
 unknown_level:
-    ret = -EOPNOTSUPP;  /* Kernel seems to return this value despite `man` saying that it can
-                         * return only ENOPROTOOPT. */
+    ret = -EOPNOTSUPP; /* Kernel seems to return this value despite `man` saying that it can
+                        * return only ENOPROTOOPT. */
     goto out;
 unknown_opt:
     ret = -ENOPROTOOPT;

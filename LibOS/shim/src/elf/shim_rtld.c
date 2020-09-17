@@ -2,15 +2,14 @@
 /* Copyright (C) 2014 Stony Brook University */
 
 /*
- * shim_rtld.c
- *
- * This file contains codes for dynamic loading of ELF binaries in library OS.
+ * This file contains code for dynamic loading of ELF binaries in library OS.
  * It's espeically used for loading interpreter (ld.so, in general) and
  * optimization of execve.
- * Most of the source codes are imported from GNU C library.
+ * Most of the source code was imported from GNU C library.
  */
 
 #include <asm/mman.h>
+#include <endian.h>
 #include <errno.h>
 
 #include "elf.h"
@@ -259,7 +258,6 @@ static struct link_map* new_elf_object(const char* realname, int type) {
     return new;
 }
 
-#include <endian.h>
 #if __BYTE_ORDER == __BIG_ENDIAN
 #define byteorder ELFDATA2MSB
 #elif __BYTE_ORDER == __LITTLE_ENDIAN
@@ -1056,6 +1054,33 @@ static unsigned long int elf_hash(const char* name_arg) {
     return hash;
 }
 
+/* Check whether the symbol matches.  */
+static ElfW(Sym)* check_match(ElfW(Sym)* sym, ElfW(Sym)* ref, const char* strtab,
+                              const char* undef_name, int len) {
+    unsigned int stt = ELFW(ST_TYPE)(sym->st_info);
+
+    if ((sym->st_value == 0 /* No value */ && stt != STT_TLS) || sym->st_shndx == SHN_UNDEF)
+        return NULL;
+
+    /* Ignore all but STT_NOTYPE, STT_OBJECT, STT_FUNC,
+       STT_COMMON, STT_TLS, and STT_GNU_IFUNC since these are no
+       code/data definitions.  */
+    #define ALLOWED_STT                                                                \
+        ((1 << STT_NOTYPE) | (1 << STT_OBJECT) | (1 << STT_FUNC) | (1 << STT_COMMON) | \
+         (1 << STT_TLS) | (1 << STT_GNU_IFUNC))
+
+    if (((1 << stt) & ALLOWED_STT) == 0)
+        return NULL;
+
+    if (sym != ref && memcmp(strtab + sym->st_name, undef_name, len + 1))
+        /* Not the symbol we are looking for.  */
+        return NULL;
+
+    /* There cannot be another entry for this symbol so stop here.  */
+    return sym;
+}
+
+
 static ElfW(Sym)* do_lookup_map(ElfW(Sym)* ref, const char* undef_name, const uint_fast32_t hash,
                                 unsigned long int elf_hash, const struct link_map* map) {
     /* These variables are used in the nested function.  */
@@ -1065,31 +1090,6 @@ static ElfW(Sym)* do_lookup_map(ElfW(Sym)* ref, const char* undef_name, const ui
     ElfW(Sym)* symtab  = (void*)D_PTR(map->l_info[DT_SYMTAB]);
     const char* strtab = (const void*)D_PTR(map->l_info[DT_STRTAB]);
     int len            = strlen(undef_name);
-
-    /* Nested routine to check whether the symbol matches.  */
-    ElfW(Sym)* check_match(ElfW(Sym)* sym) {
-        unsigned int stt = ELFW(ST_TYPE)(sym->st_info);
-
-        if ((sym->st_value == 0 /* No value */ && stt != STT_TLS) || sym->st_shndx == SHN_UNDEF)
-            return NULL;
-
-/* Ignore all but STT_NOTYPE, STT_OBJECT, STT_FUNC,
-   STT_COMMON, STT_TLS, and STT_GNU_IFUNC since these are no
-   code/data definitions.  */
-#define ALLOWED_STT                                                                \
-    ((1 << STT_NOTYPE) | (1 << STT_OBJECT) | (1 << STT_FUNC) | (1 << STT_COMMON) | \
-     (1 << STT_TLS) | (1 << STT_GNU_IFUNC))
-
-        if (((1 << stt) & ALLOWED_STT) == 0)
-            return NULL;
-
-        if (sym != ref && memcmp(strtab + sym->st_name, undef_name, len + 1))
-            /* Not the symbol we are looking for.  */
-            return NULL;
-
-        /* There cannot be another entry for this symbol so stop here.  */
-        return sym;
-    }
 
     const ElfW(Addr)* bitmask = map->l_gnu_bitmask;
 
@@ -1108,7 +1108,7 @@ static ElfW(Sym)* do_lookup_map(ElfW(Sym)* ref, const char* undef_name, const ui
                 do {
                     if (((*hasharr ^ hash) >> 1) == 0) {
                         symidx = hasharr - map->l_gnu_chain_zero;
-                        sym    = check_match(&symtab[symidx]);
+                        sym    = check_match(&symtab[symidx], ref, strtab, undef_name, len);
                         if (sym != NULL)
                             return sym;
                     }
@@ -1124,7 +1124,7 @@ static ElfW(Sym)* do_lookup_map(ElfW(Sym)* ref, const char* undef_name, const ui
            for the same symbol name.  */
         for (symidx = map->l_buckets[elf_hash % map->l_nbuckets]; symidx != STN_UNDEF;
              symidx = map->l_chain[symidx]) {
-            sym = check_match(&symtab[symidx]);
+            sym = check_match(&symtab[symidx], ref, strtab, undef_name, len);
             if (sym != NULL)
                 return sym;
         }
@@ -1271,7 +1271,7 @@ static int __load_interp_object(struct link_map* exec_map) {
         debug("search interpreter: %s\n", interp_path);
 
         struct shim_dentry* dent = NULL;
-        int ret                  = 0;
+        int ret = 0;
 
         if ((ret = path_lookupat(NULL, interp_path, LOOKUP_OPEN, &dent, NULL)) < 0 ||
             dent->state & DENTRY_NEGATIVE)
@@ -1449,7 +1449,7 @@ int init_internal_map(void) {
 
 int init_loader(void) {
     struct shim_thread* cur_thread = get_cur_thread();
-    int ret                        = 0;
+    int ret = 0;
 
     lock(&cur_thread->lock);
     struct shim_handle* exec = cur_thread->exec;
@@ -1576,7 +1576,7 @@ noreturn void execute_elf_object(struct shim_handle* exec, void* argp, ElfW(auxv
     ElfW(Addr) auxp_extra = (ElfW(Addr))&auxp[8];
 
     ElfW(Addr) random = auxp_extra; /* random 16B for AT_RANDOM */
-    ret               = DkRandomBitsRead((PAL_PTR)random, 16);
+    ret = DkRandomBitsRead((PAL_PTR)random, 16);
     if (ret < 0) {
         debug("execute_elf_object: DkRandomBitsRead failed.\n");
         DkThreadExit(/*clear_child_tid=*/NULL);

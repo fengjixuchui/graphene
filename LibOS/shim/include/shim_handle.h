@@ -12,17 +12,18 @@
 
 #include <asm/fcntl.h>
 #include <asm/resource.h>
-#include <atomic.h>  // TODO: migrate to stdatomic.h
 #include <linux/in.h>
 #include <linux/in6.h>
 #include <linux/shm.h>
 #include <linux/un.h>
-#include <list.h>
-#include <pal.h>
-#include <shim_defs.h>
-#include <shim_sysv.h>
-#include <shim_types.h>
 #include <stdalign.h>
+
+#include "atomic.h"  // TODO: migrate to stdatomic.h
+#include "list.h"
+#include "pal.h"
+#include "shim_defs.h"
+#include "shim_sysv.h"
+#include "shim_types.h"
 
 /* start definition of shim handle */
 enum shim_handle_type {
@@ -286,12 +287,25 @@ struct shim_str_handle {
 
 DEFINE_LIST(shim_epoll_item);
 DEFINE_LISTP(shim_epoll_item);
+struct shim_epoll_item {
+    FDTYPE fd;
+    uint64_t data;
+    unsigned int events;
+    unsigned int revents;
+    bool connected;
+    /* The two references below are not ref-counted (to prevent cycles). When a handle is dropped
+     * (ref-count goes to 0) it is also removed from all epoll instances. When an epoll instance is
+     * destroyed, all handles that it traced are removed from it. */
+    struct shim_handle* handle;      /* reference to monitored object (socket, pipe, file, etc) */
+    struct shim_handle* epoll;       /* reference to epoll object that monitors handle object */
+    LIST_TYPE(shim_epoll_item) list; /* list of shim_epoll_items, used by epoll object (via `fds`) */
+    LIST_TYPE(shim_epoll_item) back; /* list of epolls, used by handle object (via `epolls`) */
+};
+
 struct shim_epoll_handle {
-    int maxfds;
     int waiter_cnt;
 
     int pal_cnt;
-    PAL_HANDLE* pal_handles;
 
     AEVENTTYPE event;
     LISTP_TYPE(shim_epoll_item) fds;
@@ -347,6 +361,9 @@ struct shim_handle* get_new_handle(void);
 void flush_handle(struct shim_handle* hdl);
 void get_handle(struct shim_handle* hdl);
 void put_handle(struct shim_handle* hdl);
+
+/* Set handle to non-blocking mode. */
+int set_handle_nonblocking(struct shim_handle* hdl);
 
 /* file descriptor table */
 struct shim_fd_handle {

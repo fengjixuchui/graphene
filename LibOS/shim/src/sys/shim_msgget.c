@@ -12,16 +12,17 @@
  */
 
 #include <errno.h>
-#include <list.h>
-#include <pal.h>
-#include <pal_error.h>
-#include <shim_handle.h>
-#include <shim_internal.h>
-#include <shim_ipc.h>
-#include <shim_sysv.h>
-#include <shim_table.h>
-#include <shim_unistd.h>
-#include <shim_utils.h>
+
+#include "list.h"
+#include "pal.h"
+#include "pal_error.h"
+#include "shim_handle.h"
+#include "shim_internal.h"
+#include "shim_ipc.h"
+#include "shim_sysv.h"
+#include "shim_table.h"
+#include "shim_unistd.h"
+#include "shim_utils.h"
 
 #define MSGQ_HASH_LEN  8
 #define MSGQ_HASH_NUM  (1 << MSGQ_HASH_LEN)
@@ -271,14 +272,14 @@ int shim_do_msgget(key_t key, int msgflg) {
 
     if (msgflg & IPC_CREAT) {
         do {
-            msgid = allocate_sysv(0, 0);
+            msgid = allocate_ipc_id(0, 0);
             if (!msgid)
-                ipc_sysv_lease_send(NULL);
+                ipc_lease_send(NULL);
         } while (!msgid);
 
         if (key != IPC_PRIVATE) {
             if ((ret = ipc_sysv_tellkey_send(NULL, 0, &k, msgid, 0)) < 0) {
-                release_sysv(msgid);
+                release_ipc_id(msgid);
                 return ret;
             }
         }
@@ -292,7 +293,7 @@ int shim_do_msgget(key_t key, int msgflg) {
 
         msgid = ret;
 
-        if ((ret = ipc_sysv_query_send(msgid)) < 0)
+        if ((ret = ipc_query_send(msgid)) < 0)
             return ret;
 
         add_msg_handle(key, msgid, false);
@@ -306,7 +307,7 @@ static int connect_msg_handle(int msqid, struct shim_msg_handle** msgqp) {
     int ret;
 
     if (!msgq) {
-        if ((ret = ipc_sysv_query_send(msqid)) < 0)
+        if ((ret = ipc_query_send(msqid)) < 0)
             return ret;
 
         if (!msgq) {
@@ -695,9 +696,8 @@ static int __store_msg_persist(struct shim_msg_handle* msgq) {
     if (DkStreamSetLength(file, expected_size))
         goto err_file;
 
-    void* mem =
-        (void*)DkStreamMap(file, NULL, PAL_PROT_READ | PAL_PROT_WRITE, 0,
-                           ALLOC_ALIGN_UP(expected_size));
+    void* mem = (void*)DkStreamMap(file, NULL, PAL_PROT_READ | PAL_PROT_WRITE, 0,
+                                   ALLOC_ALIGN_UP(expected_size));
     if (!mem) {
         ret = -EFAULT;
         goto err_file;
@@ -743,7 +743,7 @@ static int __store_msg_persist(struct shim_msg_handle* msgq) {
         }
 
     msgq->owned = false;
-    ret         = 0;
+    ret = 0;
     goto out;
 
 err_file:

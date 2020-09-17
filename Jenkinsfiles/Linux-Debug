@@ -8,8 +8,7 @@ pipeline {
                 stage('Lint') {
                     steps {
                         sh '''
-                            ./.ci/run-shellcheck || :
-                            ./.ci/run-shellcheck -f json | ./.ci/prfilter
+                            ./.ci/run-shellcheck
                         '''
                     }
                 }
@@ -127,6 +126,13 @@ pipeline {
                                 make check
                             '''
                         }
+                        timeout(time: 5, unit: 'MINUTES') {
+                            sh '''
+                                cd Examples/r
+                                make -j8 all
+                                make check
+                            '''
+                        }
                         sh '''
                            # Workaround LTP bug (see https://github.com/linux-test-project/ltp/issues/560 for upstream fix):
                            git -C LibOS/shim/test/ltp/src checkout -- utils/ffsb-6.0-rc2/config.h.in utils/ffsb-6.0-rc2/configure
@@ -154,6 +160,7 @@ pipeline {
                            make -C Examples/nginx distclean
                            make -C Examples/apache distclean
                            make -C Examples/blender distclean
+                           make -C Examples/r distclean
                            make -C Pal/src PAL_HOST=Skeleton clean
 
                            ./Scripts/clean-check

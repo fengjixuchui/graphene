@@ -1,12 +1,13 @@
 #ifndef _SHIM_TABLE_H_
 #define _SHIM_TABLE_H_
 
-#include <shim_types.h>
-#include <shim_unistd.h>
 #include <stdnoreturn.h>
-#if defined(__i386__) || defined (__x86_64__)
+#if defined(__i386__) || defined(__x86_64__)
 #include <asm/ldt.h>
 #endif
+
+#include "shim_types.h"
+#include "shim_unistd.h"
 
 #ifdef IN_SHIM
 
@@ -410,7 +411,7 @@ int shim_do_mkdir(const char* pathname, int mode);
 int shim_do_rmdir(const char* pathname);
 int shim_do_creat(const char* path, mode_t mode);
 int shim_do_unlink(const char* file);
-int shim_do_readlink(const char* file, char* buf, size_t bufsize);
+int shim_do_readlink(const char* file, char* buf, int bufsize);
 int shim_do_chmod(const char* filename, mode_t mode);
 int shim_do_fchmod(int fd, mode_t mode);
 int shim_do_chown(const char* filename, uid_t user, gid_t group);
@@ -476,6 +477,7 @@ int shim_do_openat(int dfd, const char* filename, int flags, int mode);
 int shim_do_mkdirat(int dfd, const char* pathname, int mode);
 int shim_do_newfstatat(int dirfd, const char* pathname, struct stat* statbuf, int flags);
 int shim_do_unlinkat(int dfd, const char* pathname, int flag);
+int shim_do_readlinkat(int dirfd, const char* file, char* buf, int bufsize);
 int shim_do_renameat(int olddfd, const char* pathname, int newdfd, const char* newname);
 int shim_do_fchmodat(int dfd, const char* filename, mode_t mode);
 int shim_do_fchownat(int dfd, const char* filename, uid_t user, gid_t group, int flags);
@@ -492,8 +494,8 @@ int shim_do_accept4(int sockfd, struct sockaddr* addr, int* addrlen, int flags);
 int shim_do_dup3(unsigned int oldfd, unsigned int newfd, int flags);
 int shim_do_epoll_create1(int flags);
 int shim_do_pipe2(int* fildes, int flags);
-int shim_do_mknod(const char *pathname, mode_t mode, dev_t dev);
-int shim_do_mknodat(int dirfd, const char *pathname, mode_t mode, dev_t dev);
+int shim_do_mknod(const char* pathname, mode_t mode, dev_t dev);
+int shim_do_mknodat(int dirfd, const char* pathname, mode_t mode, dev_t dev);
 ssize_t shim_do_recvmmsg(int sockfd, struct mmsghdr* msg, unsigned int vlen, int flags,
                          struct __kernel_timespec* timeout);
 int shim_do_prlimit64(pid_t pid, int resource, const struct __kernel_rlimit64* new_rlim,
@@ -599,7 +601,7 @@ int shim_creat(const char* path, mode_t mode);
 int shim_link(const char* oldname, const char* newname);
 int shim_unlink(const char* file);
 int shim_symlink(const char* old, const char* new);
-int shim_readlink(const char* file, char* buf, size_t bufsize);
+int shim_readlink(const char* file, char* buf, int bufsize);
 int shim_chmod(const char* filename, mode_t mode);
 int shim_fchmod(int fd, mode_t mode);
 int shim_chown(const char* filename, uid_t user, gid_t group);

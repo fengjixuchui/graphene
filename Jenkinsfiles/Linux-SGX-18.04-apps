@@ -12,8 +12,7 @@ pipeline {
                             ./.ci/run-pylint -f text || :
                             ./.ci/run-pylint -f json | ./.ci/prfilter
 
-                            ./.ci/run-shellcheck || :
-                            ./.ci/run-shellcheck -f json | ./.ci/prfilter
+                            ./.ci/run-shellcheck
                         '''
                     }
                 }
@@ -69,6 +68,13 @@ pipeline {
                         timeout(time: 5, unit: 'MINUTES') {
                             sh '''
                                 cd Examples/python-scipy-insecure
+                                PYTHONVERSION=python3.6 make -j8 SGX=1
+                                PYTHONVERSION=python3.6 make SGX=1 check
+                            '''
+                        }
+                        timeout(time: 5, unit: 'MINUTES') {
+                            sh '''
+                                cd Examples/python-sh-insecure
                                 PYTHONVERSION=python3.6 make -j8 SGX=1
                                 PYTHONVERSION=python3.6 make SGX=1 check
                             '''
@@ -140,6 +146,13 @@ pipeline {
                         }
                         timeout(time: 5, unit: 'MINUTES') {
                             sh '''
+                                cd Examples/r
+                                make -j8 SGX=1
+                                make SGX=1 check
+                            '''
+                        }
+                        timeout(time: 5, unit: 'MINUTES') {
+                            sh '''
                                 cd Examples/ra-tls-mbedtls
                                 if [ "${ra_client_spid}" != "" ] && [ "${ra_client_key}" != "" ]; \
                                 then \
@@ -183,6 +196,7 @@ pipeline {
 
                            make -C Examples/python-simple SGX=1 clean
                            make -C Examples/python-scipy-insecure SGX=1 clean
+                           make -C Examples/python-sh-insecure SGX=1 clean
                            make -C Examples/bash SGX=1 clean
                            make -C Examples/curl SGX=1 clean
                            make -C Examples/gcc SGX=1 distclean
@@ -191,6 +205,7 @@ pipeline {
                            make -C Examples/nginx SGX=1 distclean
                            make -C Examples/apache SGX=1 distclean
                            make -C Examples/blender SGX=1 distclean
+                           make -C Examples/r SGX=1 distclean
                            make -C Examples/ra-tls-mbedtls SGX=1 distclean
                            make -C Examples/ra-tls-secret-prov SGX=1 distclean
 

@@ -1,4 +1,4 @@
-#define _XOPEN_SOURCE 700
+#define _GNU_SOURCE
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -61,7 +61,8 @@ int main(int argc, char** argv) {
 
     f = fopen("/proc/self/dummy", "r");
     if (f != NULL || errno != ENOENT) {
-        perror("(sanity check) fopen of /proc/self/dummy (non-existing file) did not fail with ENOENT");
+        perror("(sanity check) fopen of /proc/self/dummy (non-existing file) did not fail with "
+               "ENOENT");
         return 1;
     }
 
@@ -133,9 +134,20 @@ int main(int argc, char** argv) {
     }
 
     printf("===== Reading /proc/self/exe symlink\n");
-    ssize_t len = readlink("/proc/self/exe", buf, sizeof(buf) - 1);
+    int proc_dirfd = open("/proc", O_DIRECTORY | O_PATH | O_RDONLY);
+    if (proc_dirfd < 0) {
+        perror("open /proc");
+        return 1;
+    }
+
+    ssize_t len = readlinkat(proc_dirfd, "self/exe", buf, sizeof(buf) - 1);
     if (len < 0) {
         perror("readlink /proc/self/exe");
+        return 1;
+    }
+
+    if (close(proc_dirfd) < 0) {
+        perror("close proc_dirfd");
         return 1;
     }
 

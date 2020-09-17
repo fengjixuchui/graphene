@@ -19,7 +19,7 @@ void* sgx_copy_to_ustack(const void* ptr, uint64_t size);
 void sgx_reset_ustack(const void* old_ustack);
 
 bool sgx_copy_ptr_to_enclave(void** ptr, void* uptr, size_t size);
-bool sgx_copy_to_enclave(const void* ptr, size_t maxsize, const void* uptr, size_t usize);
+bool sgx_copy_to_enclave(void* ptr, size_t maxsize, const void* uptr, size_t usize);
 
 /*!
  * \brief Low-level wrapper around EREPORT instruction leaf.
@@ -27,8 +27,8 @@ bool sgx_copy_to_enclave(const void* ptr, size_t maxsize, const void* uptr, size
  * Caller is responsible for parameter alignment: 512B for `targetinfo`, 128B for `reportdata`,
  * and 512B for `report`.
  */
-static inline int sgx_report(const sgx_target_info_t* targetinfo,
-                             const void* reportdata, sgx_report_t* report) {
+static inline int sgx_report(const sgx_target_info_t* targetinfo, const void* reportdata,
+                             sgx_report_t* report) {
     __asm__ volatile(
         ENCLU "\n"
         :: "a"(EREPORT), "b"(targetinfo), "c"(reportdata), "d"(report)

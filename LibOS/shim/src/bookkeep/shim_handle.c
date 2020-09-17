@@ -2,18 +2,16 @@
 /* Copyright (C) 2014 Stony Brook University */
 
 /*
- * shim_handle.c
- *
- * This file contains codes to maintain bookkeeping for handles in library OS.
+ * This file contains code to maintain bookkeeping for handles in library OS.
  */
 
-#include <pal.h>
-#include <pal_error.h>
-#include <shim_checkpoint.h>
-#include <shim_fs.h>
-#include <shim_handle.h>
-#include <shim_internal.h>
-#include <shim_thread.h>
+#include "pal.h"
+#include "pal_error.h"
+#include "shim_checkpoint.h"
+#include "shim_fs.h"
+#include "shim_handle.h"
+#include "shim_internal.h"
+#include "shim_thread.h"
 
 static struct shim_lock handle_mgr_lock;
 
@@ -24,7 +22,7 @@ static struct shim_lock handle_mgr_lock;
 #define SYSTEM_LOCKED() locked(&handle_mgr_lock)
 
 #define OBJ_TYPE struct shim_handle
-#include <memmgr.h>
+#include "memmgr.h"
 
 static MEM_MGR handle_mgr = NULL;
 
@@ -44,9 +42,9 @@ static inline int init_tty_handle(struct shim_handle* hdl, bool write) {
     if ((ret = path_lookupat(NULL, "/dev/tty", LOOKUP_OPEN, &dent, NULL)) < 0)
         return ret;
 
-    int flags             = (write ? O_WRONLY : O_RDONLY) | O_APPEND;
+    int flags = (write ? O_WRONLY : O_RDONLY) | O_APPEND;
     struct shim_mount* fs = dent->fs;
-    ret                   = fs->d_ops->open(hdl, dent, flags);
+    ret = fs->d_ops->open(hdl, dent, flags);
     if (ret < 0)
         return ret;
 
@@ -54,13 +52,7 @@ static inline int init_tty_handle(struct shim_handle* hdl, bool write) {
     hdl->dentry = dent;
     hdl->flags  = O_RDWR | O_APPEND | 0100000;
 
-    size_t size;
-    char* path = dentry_get_path(dent, true, &size);
-    if (path)
-        qstrsetstr(&hdl->path, path, size);
-    else
-        qstrsetstr(&hdl->path, "/dev/tty", 8);
-
+    dentry_get_path_into_qstr(dent, &hdl->path);
     return 0;
 }
 
@@ -90,11 +82,8 @@ static inline int init_exec_handle(struct shim_thread* thread) {
         }
         path_lookupat(fs->root, p, 0, &exec->dentry, fs);
         set_handle_fs(exec, fs);
-        if (exec->dentry) {
-            size_t len;
-            const char* path = dentry_get_path(exec->dentry, true, &len);
-            qstrsetstr(&exec->path, path, len);
-        }
+        if (exec->dentry)
+            dentry_get_path_into_qstr(exec->dentry, &exec->path);
         put_mount(fs);
     } else {
         set_handle_fs(exec, &chroot_builtin_fs);
@@ -142,7 +131,10 @@ int init_important_handles(void) {
             return -ENOMEM;
 
         set_handle_map(thread, handle_map);
+        put_handle_map(handle_map);
     }
+
+    /* `handle_map` is set in current thread, no need to increase ref-count. */
 
     lock(&handle_map->lock);
 
@@ -439,10 +431,7 @@ void get_handle(struct shim_handle* hdl) {
 static void destroy_handle(struct shim_handle* hdl) {
     destroy_lock(&hdl->lock);
 
-    if (memory_migrated(hdl))
-        memset(hdl, 0, sizeof(struct shim_handle));
-    else
-        free_mem_obj_to_mgr(handle_mgr, hdl);
+    free_mem_obj_to_mgr(handle_mgr, hdl);
 }
 
 void put_handle(struct shim_handle* hdl) {
@@ -453,6 +442,8 @@ void put_handle(struct shim_handle* hdl) {
 #endif
 
     if (!ref_count) {
+        delete_from_epoll_handles(hdl);
+
         if (hdl->type == TYPE_DIR) {
             struct shim_dir_handle* dir = &hdl->dir_info;
 
@@ -482,8 +473,6 @@ void put_handle(struct shim_handle* hdl) {
                 hdl->info.sock.peek_buffer = NULL;
             }
         }
-
-        delete_from_epoll_handles(hdl);
 
         if (hdl->fs && hdl->fs->fs_ops && hdl->fs->fs_ops->hput)
             hdl->fs->fs_ops->hput(hdl);
@@ -543,9 +532,12 @@ static struct shim_handle_map* get_new_handle_map(FDTYPE size) {
     handle_map->fd_top  = FD_NULL;
     handle_map->fd_size = size;
     if (!create_lock(&handle_map->lock)) {
+        free(handle_map->map);
         free(handle_map);
         return NULL;
     }
+
+    REF_SET(handle_map->ref_count, 1);
 
     return handle_map;
 }
@@ -730,8 +722,15 @@ BEGIN_CP_FUNC(handle) {
             new_hdl->fs = NULL;
         }
 
-        if (hdl->dentry)
+        if (hdl->dentry) {
+            if (hdl->dentry->state & DENTRY_ISDIRECTORY) {
+                /* we don't checkpoint children dentries of a directory dentry, so need to list
+                 * directory again in child process; mark handle to indicate no cached dentries */
+                hdl->dir_info.buf = (void*)-1;
+                hdl->dir_info.ptr = (void*)-1;
+            }
             DO_CP_MEMBER(dentry, hdl, new_hdl, dentry);
+        }
 
         if (new_hdl->pal_handle) {
             struct shim_palhdl_entry* entry;
@@ -740,16 +739,23 @@ BEGIN_CP_FUNC(handle) {
             entry->phandle = &new_hdl->pal_handle;
         }
 
-        if (hdl->type == TYPE_EPOLL)
-            DO_CP(epoll_item, &hdl->info.epoll.fds, &new_hdl->info.epoll.fds);
-
-        if (hdl->type == TYPE_SOCK) {
-            /* no support for multiple processes sharing options/peek buffer of the socket */
-            new_hdl->info.sock.pending_options = NULL;
-            new_hdl->info.sock.peek_buffer     = NULL;
-        }
-
         INIT_LISTP(&new_hdl->epolls);
+
+        switch (hdl->type) {
+            case TYPE_EPOLL:
+                /* `new_hdl->info.epoll.pal_cnt` stays the same - copied above. */
+                DO_CP(epoll_item, &hdl->info.epoll.fds, &new_hdl->info.epoll.fds);
+                new_hdl->info.epoll.waiter_cnt = 0;
+                memset(&new_hdl->info.epoll.event, '\0', sizeof(new_hdl->info.epoll.event));
+                break;
+            case TYPE_SOCK:
+                /* no support for multiple processes sharing options/peek buffer of the socket */
+                new_hdl->info.sock.pending_options = NULL;
+                new_hdl->info.sock.peek_buffer     = NULL;
+                break;
+            default:
+                break;
+        }
 
         unlock(&hdl->lock);
         ADD_CP_FUNC_ENTRY(off);
@@ -781,14 +787,32 @@ BEGIN_RS_FUNC(handle) {
             destroy_lock(&hdl->lock);
             return -EINVAL;
         }
+    } else {
+        get_mount(hdl->fs);
     }
 
-    if (hdl->type == TYPE_DEV) {
-        /* for device handles, info.dev.dev_ops contains function pointers into LibOS; they may
-           have become invalid due to relocation of LibOS text section in the child, update them */
-        if (dev_update_dev_ops(hdl) < 0) {
-            return -EINVAL;
-        }
+    if (hdl->dentry) {
+        get_dentry(hdl->dentry);
+    }
+
+    switch (hdl->type) {
+        case TYPE_DEV:
+            /* for device handles, info.dev.dev_ops contains function pointers into LibOS; they may
+             * have become invalid due to relocation of LibOS text section in the child, update them
+             */
+            if (dev_update_dev_ops(hdl) < 0) {
+                return -EINVAL;
+            }
+            break;
+        case TYPE_EPOLL:
+            create_event(&hdl->info.epoll.event);
+            struct shim_epoll_item* epoll_item;
+            LISTP_FOR_EACH_ENTRY(epoll_item, &hdl->info.epoll.fds, list) {
+                epoll_item->epoll = hdl;
+            }
+            break;
+        default:
+            break;
     }
 
     if (hdl->fs && hdl->fs->fs_ops && hdl->fs->fs_ops->checkin)

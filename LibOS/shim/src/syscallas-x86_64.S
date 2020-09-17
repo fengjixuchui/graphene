@@ -7,8 +7,8 @@
  * This file contains the entry point of system call table in library OS.
  */
 
-#include "shim_defs.h"
 #include "asm-offsets.h"
+#include "shim_defs.h"
 
         .global syscalldb
         .type syscalldb, @function
@@ -116,6 +116,9 @@ isundef:
          * %rcx: Instruction address to continue app execution after trapped
          *       syscall instruction
          * %r11: rflags on entering syscall
+         *
+         * Omit CFI information for %rflags when compiling under clang, see bug:
+         *   https://bugs.llvm.org/show_bug.cgi?id=33633
          */
 syscall_wrapper:
         .cfi_startproc
@@ -123,7 +126,9 @@ syscall_wrapper:
         # %rcx is used as input for returning %rip
         .cfi_register %rip, %rcx
         # %r11 is used as input to keep %rflags
+#ifndef __clang__
         .cfi_register %rflags, %r11
+#endif
         subq $RED_ZONE_SIZE, %rsp
         .cfi_adjust_cfa_offset RED_ZONE_SIZE
         callq *syscalldb@GOTPCREL(%rip)
@@ -134,10 +139,14 @@ syscall_wrapper_after_syscalldb:
         # This must be done after "addq $RED_ZONE_SIZE, %rsp" above
         # which destroys %rflags
         xchg %r11, (%rsp)
+#ifndef __clang__
         .cfi_offset %rflags, 0
+#endif
         popfq
         .cfi_adjust_cfa_offset -8
+#ifndef __clang__
         .cfi_same_value %rflags
+#endif
         pushq %r11
         .cfi_adjust_cfa_offset 8
         jmp *%rcx

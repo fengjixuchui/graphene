@@ -12,13 +12,14 @@
 #include <sys/mman.h>
 #include <sys/syscall.h>
 
-#include <pal.h>
-#include <pal_error.h>
-#include <shim_fs.h>
-#include <shim_internal.h>
-#include <shim_ipc.h>
-#include <shim_table.h>
-#include <shim_thread.h>
+#include "pal.h"
+#include "pal_error.h"
+#include "shim_checkpoint.h"
+#include "shim_fs.h"
+#include "shim_internal.h"
+#include "shim_ipc.h"
+#include "shim_table.h"
+#include "shim_thread.h"
 
 /* returns 0 if normalized URIs are the same; assumes file URIs */
 static int normalize_and_cmp_uris(const char* uri1, const char* uri2) {
@@ -156,15 +157,12 @@ static int shim_do_execve_rtld(struct shim_handle* hdl, const char** argv, const
     return 0;
 }
 
-#include <shim_checkpoint.h>
-
 static BEGIN_MIGRATION_DEF(execve, struct shim_thread* thread, struct shim_process* proc,
                            const char** argv, const char** envp) {
     DEFINE_MIGRATE(process, proc, sizeof(struct shim_process));
     DEFINE_MIGRATE(all_mounts, NULL, 0);
     DEFINE_MIGRATE(running_thread, thread, sizeof(struct shim_thread));
     DEFINE_MIGRATE(pending_signals, NULL, 0);
-    DEFINE_MIGRATE(handle_map, thread->handle_map, sizeof(struct shim_handle_map));
     DEFINE_MIGRATE(migratable, NULL, 0);
     DEFINE_MIGRATE(arguments, argv, 0);
     DEFINE_MIGRATE(environ, envp, 0);
@@ -185,7 +183,9 @@ static int migrate_execve(struct shim_cp_store* cpstore, struct shim_thread* thr
 
     set_handle_map(thread, handle_map);
 
-    if ((ret = close_cloexec_handle(handle_map)) < 0)
+    ret = close_cloexec_handle(handle_map);
+    put_handle_map(handle_map);
+    if (ret < 0)
         return ret;
 
     return START_MIGRATE(cpstore, execve, thread, process, argv, envp);
@@ -270,9 +270,7 @@ reopen:
         return -EACCES;
     }
 
-    size_t pathlen;
-    char* path = dentry_get_path(dent, true, &pathlen);
-    qstrsetstr(&exec->path, path, pathlen);
+    dentry_get_path_into_qstr(dent, &exec->path);
 
     if ((ret = check_elf_object(exec)) < 0 && ret != -EINVAL) {
         put_handle(exec);

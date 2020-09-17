@@ -33,6 +33,7 @@ c_executables = \
 	futex_wake_op \
 	getcwd \
 	getdents \
+	getsockname \
 	getsockopt \
 	host_root_fs \
 	init_fail \
@@ -45,6 +46,8 @@ c_executables = \
 	multi_pthread \
 	openmp \
 	pipe \
+	pipe_nonblocking \
+	pipe_ocloexec \
 	poll \
 	poll_closed_fd \
 	poll_many_types \

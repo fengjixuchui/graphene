@@ -4,17 +4,15 @@
  */
 
 /*
- * shim_dcache.c
- *
- * This file contains codes for maintaining directory cache in library OS.
+ * This file contains code for maintaining directory cache in library OS.
  */
 
-#include <list.h>
-#include <shim_checkpoint.h>
-#include <shim_fs.h>
-#include <shim_handle.h>
-#include <shim_internal.h>
-#include <shim_types.h>
+#include "list.h"
+#include "shim_checkpoint.h"
+#include "shim_fs.h"
+#include "shim_handle.h"
+#include "shim_internal.h"
+#include "shim_types.h"
 
 static struct shim_lock dcache_mgr_lock;
 
@@ -25,7 +23,7 @@ static struct shim_lock dcache_mgr_lock;
 #define DCACHE_MGR_ALLOC 64
 
 #define OBJ_TYPE struct shim_dentry
-#include <memmgr.h>
+#include "memmgr.h"
 
 struct shim_lock dcache_lock;
 
@@ -45,7 +43,7 @@ static struct shim_dentry* alloc_dentry(void) {
 
     memset(dent, 0, sizeof(struct shim_dentry));
 
-    REF_SET(dent->ref_count, 0);
+    REF_SET(dent->ref_count, 1);
     dent->mode = NO_MODE;
 
     INIT_LIST_HEAD(dent, hlist);
@@ -69,9 +67,12 @@ int init_dcache(void) {
     dentry_mgr = create_mem_mgr(init_align_up(DCACHE_MGR_ALLOC));
 
     dentry_root = alloc_dentry();
+    if (!dentry_root) {
+        return -ENOMEM;
+    }
 
-    /* The root is special; we assume it won't change or be freed, and
-     * set its refcount to 1. */
+    /* The root is special; we assume it won't change or be freed, so we artificially increase its
+     * refcount by 1. */
     get_dentry(dentry_root);
 
     /* Initialize the root to a valid state, as a low-level lookup
@@ -84,7 +85,6 @@ int init_dcache(void) {
     qstrsetstr(&dentry_root->name, "", 0);
     qstrsetstr(&dentry_root->rel_path, "", 0);
 
-    get_dentry(dentry_root);
     return 0;
 }
 
@@ -155,8 +155,6 @@ struct shim_dentry* get_new_dentry(struct shim_mount* mount, struct shim_dentry*
 
     if (!dent)
         return NULL;
-
-    get_dentry(dent);
 
     if (hashptr) {
 #ifdef DEBUG
@@ -344,6 +342,9 @@ BEGIN_CP_FUNC(dentry) {
         clear_lock(&new_dent->lock);
         REF_SET(new_dent->ref_count, 0);
 
+        /* we don't checkpoint children dentries, so need to list directory again */
+        new_dent->state &= ~DENTRY_LISTED;
+
         if (new_dent->fs == &fifo_builtin_fs) {
             /* FIFO pipe, do not try to checkpoint its fs */
             new_dent->fs = NULL;
@@ -394,6 +395,8 @@ BEGIN_RS_FUNC(dentry) {
     if (!dent->fs) {
         /* special case of FIFO pipe: use built-in FIFO FS */
         dent->fs = &fifo_builtin_fs;
+    } else {
+        get_mount(dent->fs);
     }
 
     /* DEP 6/16/17: I believe the point of this line is to
@@ -405,7 +408,14 @@ BEGIN_RS_FUNC(dentry) {
         LISTP_ADD_TAIL(dent, &dent->parent->children, siblings);
     }
 
-    DEBUG_RS("hash=%08lx,path=%s,fs=%s", dent->rel_path.hash, dentry_get_path(dent, true, NULL),
+    if (dent->mounted) {
+        get_mount(dent->mounted);
+    }
+
+#if DEBUG_RESUME == 1
+    char buffer[dentry_get_path_size(dent)];
+#endif
+    DEBUG_RS("hash=%08lx,path=%s,fs=%s", dent->rel_path.hash, dentry_get_path(dent, buffer),
              dent->fs ? qstrgetstr(&dent->fs->path) : NULL);
 }
 END_RS_FUNC(dentry)

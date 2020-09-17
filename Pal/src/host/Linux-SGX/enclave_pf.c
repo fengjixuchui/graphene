@@ -11,6 +11,12 @@
 #include "pal_linux_error.h"
 #include "spinlock.h"
 
+/* Wrap key for protected files, either hard-coded in manifest, provisioned during attestation, or
+ * inherited from the parent process. We don't use synchronization on them since they are only set
+ * during initialization where Graphene runs single-threaded. */
+pf_key_t g_pf_wrap_key = {0};
+bool g_pf_wrap_key_set = false;
+
 /*
  * At startup, protected file paths are read from the manifest and the specified files
  * or directories registered. For supported I/O operations, handlers (in db_files.c)
@@ -34,8 +40,8 @@ static pf_status_t cb_read(pf_handle_t handle, void* buffer, uint64_t offset, si
             continue;
 
         if (read < 0) {
-            SGX_DBG(DBG_E, "cb_read(%d, %p, %lu, %lu): read failed: %ld\n",
-                    fd, buffer, offset, size, read);
+            SGX_DBG(DBG_E, "cb_read(%d, %p, %lu, %lu): read failed: %ld\n", fd, buffer, offset,
+                    size, read);
             return PF_STATUS_CALLBACK_FAILED;
         }
 
@@ -62,8 +68,8 @@ static pf_status_t cb_write(pf_handle_t handle, const void* buffer, uint64_t off
             continue;
 
         if (written < 0) {
-            SGX_DBG(DBG_E, "cb_write(%d, %p, %lu, %lu): write failed: %ld\n",
-                    fd, buffer, offset, size, written);
+            SGX_DBG(DBG_E, "cb_write(%d, %p, %lu, %lu): write failed: %ld\n", fd, buffer, offset,
+                    size, written);
             return PF_STATUS_CALLBACK_FAILED;
         }
 
@@ -95,10 +101,9 @@ static void cb_debug(const char* msg) {
 }
 #endif
 
-static pf_status_t cb_aes_gcm_encrypt(const pf_key_t* key, const pf_iv_t* iv,
-                                      const void* aad, size_t aad_size,
-                                      const void* input, size_t input_size, void* output,
-                                      pf_mac_t* mac) {
+static pf_status_t cb_aes_gcm_encrypt(const pf_key_t* key, const pf_iv_t* iv, const void* aad,
+                                      size_t aad_size, const void* input, size_t input_size,
+                                      void* output, pf_mac_t* mac) {
     int ret = lib_AESGCMEncrypt((const uint8_t*)key, sizeof(*key), (const uint8_t*)iv, input,
                                 input_size, aad, aad_size, output, (uint8_t*)mac, sizeof(*mac));
     if (ret != 0) {
@@ -108,10 +113,9 @@ static pf_status_t cb_aes_gcm_encrypt(const pf_key_t* key, const pf_iv_t* iv,
     return PF_STATUS_SUCCESS;
 }
 
-static pf_status_t cb_aes_gcm_decrypt(const pf_key_t* key, const pf_iv_t* iv,
-                                      const void* aad, size_t aad_size,
-                                      const void* input, size_t input_size, void* output,
-                                      const pf_mac_t* mac) {
+static pf_status_t cb_aes_gcm_decrypt(const pf_key_t* key, const pf_iv_t* iv, const void* aad,
+                                      size_t aad_size, const void* input, size_t input_size,
+                                      void* output, const pf_mac_t* mac) {
     int ret = lib_AESGCMDecrypt((const uint8_t*)key, sizeof(*key), (const uint8_t*)iv, input,
                                 input_size, aad, aad_size, output, (const uint8_t*)mac,
                                 sizeof(*mac));
@@ -130,10 +134,6 @@ static pf_status_t cb_random(uint8_t* buffer, size_t size) {
     }
     return PF_STATUS_SUCCESS;
 }
-
-/* Wrap key for protected files, either hard-coded in manifest or provisioned during attestation */
-static pf_key_t g_pf_wrap_key = {0};
-static bool g_pf_wrap_key_set = false;
 
 /* Collection of registered protected files */
 static struct protected_file* g_protected_files = NULL;
@@ -173,8 +173,7 @@ static struct protected_file* find_protected_dir(const char* path) {
     pf_lock();
     // TODO: avoid linear lookup
     for (tmp = g_protected_dirs; tmp != NULL; tmp = tmp->hh.next) {
-        if (tmp->path_len < len &&
-                !memcmp(tmp->path, path, tmp->path_len) &&
+        if (tmp->path_len < len && !memcmp(tmp->path, path, tmp->path_len) &&
                 (!path[tmp->path_len] || path[tmp->path_len] == '/')) {
             pf = tmp;
             break;
@@ -309,7 +308,7 @@ static int register_protected_dir(const char* path) {
                 goto out;
             }
             free(sub_path);
-next:
+        next:
             pos += dir->d_reclen;
         }
     } while (returned != 0);
@@ -454,7 +453,7 @@ out:
     return ret;
 }
 
-#define PF_MANIFEST_KEY_PREFIX "sgx.protected_files_key"
+#define PF_MANIFEST_KEY_PREFIX  "sgx.protected_files_key"
 #define PF_MANIFEST_PATH_PREFIX "sgx.protected_files"
 
 /* Initialize the PF library, register PFs from the manifest */
@@ -472,9 +471,8 @@ int init_protected_files(void) {
     ssize_t len = get_config(g_pal_state.root_config, PF_MANIFEST_KEY_PREFIX, key_hex,
                              sizeof(key_hex));
     if (len <= 0) {
-        /* wrap key is not hard-coded in the manifest, assume that it will be provisioned after
-         * local/remote attestation and clear it for now */
-        g_pf_wrap_key_set = false;
+        /* wrap key is not hard-coded in the manifest, assume that it was received from parent or
+         * it will be provisioned after local/remote attestation */
     } else {
         if (len != sizeof(key_hex) - 1) {
             SGX_DBG(DBG_E, "Malformed " PF_MANIFEST_KEY_PREFIX " value in the manifest\n");
@@ -488,7 +486,7 @@ int init_protected_files(void) {
                 SGX_DBG(DBG_E, "Malformed " PF_MANIFEST_KEY_PREFIX " value in the manifest\n");
                 return -PAL_ERROR_INVAL;
             }
-            g_pf_wrap_key[i/2] = g_pf_wrap_key[i/2] * 16 + (uint8_t)val;
+            g_pf_wrap_key[i / 2] = g_pf_wrap_key[i / 2] * 16 + (uint8_t)val;
         }
         g_pf_wrap_key_set = true;
     }
@@ -524,8 +522,8 @@ static int open_protected_file(const char* path, struct protected_file* pf, pf_h
 struct protected_file* load_protected_file(const char* path, int* fd, uint64_t size,
                                            pf_file_mode_t mode, bool create,
                                            struct protected_file* pf) {
-    SGX_DBG(DBG_D, "load_protected_file: %s, fd %d, size %lu, mode %d, create %d, pf %p\n",
-            path, *fd, size, mode, create, pf);
+    SGX_DBG(DBG_D, "load_protected_file: %s, fd %d, size %lu, mode %d, create %d, pf %p\n", path,
+            *fd, size, mode, create, pf);
 
     if (!pf)
         pf = get_protected_file(path);
@@ -571,8 +569,8 @@ int flush_pf_maps(struct protected_file* pf, void* buffer, bool remove) {
         pfs = pf_get_size(map_pf->context, &pf_size);
         assert(PF_SUCCESS(pfs));
 
-        SGX_DBG(DBG_D, "flush_pf_maps: pf %p, buf %p, map size %lu, offset %lu\n",
-                map_pf, map->buffer, map_size, map->offset);
+        SGX_DBG(DBG_D, "flush_pf_maps: pf %p, buf %p, map size %lu, offset %lu\n", map_pf,
+                map->buffer, map_size, map->offset);
 
         assert(pf_size >= map->offset);
         if (map->offset + map_size > pf_size)
@@ -627,7 +625,7 @@ int set_protected_files_key(const char* pf_key_hex) {
             pf_unlock();
             return -PAL_ERROR_INVAL;
         }
-        g_pf_wrap_key[i/2] = g_pf_wrap_key[i/2] * 16 + (uint8_t)val;
+        g_pf_wrap_key[i / 2] = g_pf_wrap_key[i / 2] * 16 + (uint8_t)val;
     }
     g_pf_wrap_key_set = true;
     pf_unlock();

@@ -3,7 +3,7 @@ RUNTIME_DIR = $(CURDIR)/../../../Runtime
 include ../../../Scripts/Makefile.configs
 
 CFLAGS += -fPIC -Winline -Wwrite-strings \
-	  -fmerge-all-constants -Wstrict-prototypes -Wtrampolines \
+	  -fmerge-all-constants -Wstrict-prototypes $(call cc-option,-Wtrampolines) \
 	  -Werror=implicit-function-declaration \
 	  $(cc-option, -Wnull-dereference) \
 	  -fno-stack-protector -fno-builtin -Wno-inline \
@@ -72,6 +72,7 @@ objs = \
 	ipc/shim_ipc_child.o \
 	ipc/shim_ipc_helper.o \
 	ipc/shim_ipc_pid.o \
+	ipc/shim_ipc_ranges.o \
 	ipc/shim_ipc_sysv.o \
 	sys/shim_access.o \
 	sys/shim_alarm.o \
@@ -105,7 +106,6 @@ objs = \
 	sys/shim_uname.o \
 	sys/shim_wait.o \
 	sys/shim_wrappers.o \
-	utils/md5.o \
 	utils/printf.o \
 	utils/strobjs.o \
 	vdso/vdso-data.o

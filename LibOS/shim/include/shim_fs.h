@@ -11,8 +11,8 @@
 #define _SHIM_FS_H_
 
 #define __KERNEL__
-#include <stdbool.h>
 #include <linux/stat.h>
+#include <stdbool.h>
 
 #include "list.h"
 #include "pal.h"
@@ -295,8 +295,6 @@ void put_mount(struct shim_mount* mount);
 
 struct shim_mount* find_mount_from_uri(const char* uri);
 
-#include <shim_utils.h>
-
 static inline void set_handle_fs(struct shim_handle* hdl, struct shim_mount* fs) {
     get_mount(fs);
     hdl->fs = fs;
@@ -399,48 +397,19 @@ void get_dentry(struct shim_dentry* dent);
 /* Decrement the reference count on dent */
 void put_dentry(struct shim_dentry* dent);
 
-static inline __attribute__((always_inline)) char* dentry_get_path(struct shim_dentry* dent, bool on_stack, size_t* sizeptr) {
-    struct shim_mount* fs = dent->fs;
-    char* buffer;
-    char* c;
-    size_t bufsize = dent->rel_path.len + 1;
+/* Size of the path constructed by dentry_get_path(), including null terminator. */
+size_t dentry_get_path_size(struct shim_dentry* dent);
 
-    if (fs)
-        bufsize += fs->path.len + 1;
+/* Get path (FS path + relpath). The path size can be checked by calling dentry_get_path_size(dent),
+ * and the buffer needs to have space for at least that many bytes.
+ */
+char* dentry_get_path(struct shim_dentry* dent, char* buffer);
 
-    if (on_stack) {
-        c = buffer = __alloca(bufsize);
-    } else {
-        if (!(c = buffer = malloc(bufsize)))
-            return NULL;
-    }
-
-    if (fs && !qstrempty(&fs->path)) {
-        memcpy(c, qstrgetstr(&fs->path), fs->path.len);
-        c += fs->path.len;
-    }
-
-    if (dent->rel_path.len) {
-        const char* path = qstrgetstr(&dent->rel_path);
-        int len          = dent->rel_path.len;
-
-        if (c > buffer && *(c - 1) == '/') {
-            if (*path == '/')
-                path++;
-        } else {
-            if (*path != '/')
-                *(c++) = '/';
-        }
-
-        memcpy(c, path, len);
-        c += len;
-    }
-
-    if (sizeptr)
-        *sizeptr = c - buffer;
-
-    *c = 0;
-    return buffer;
+static inline char* dentry_get_path_into_qstr(struct shim_dentry* dent, struct shim_qstr* str) {
+    size_t size = dentry_get_path_size(dent);
+    char buffer[size];
+    dentry_get_path(dent, buffer);
+    return qstrsetstr(str, buffer, size - 1);
 }
 
 static inline const char* dentry_get_name(struct shim_dentry* dent) {
@@ -541,7 +510,7 @@ struct pseudo_ent {
     const char* name;
     const struct pseudo_name_ops* name_ops;
     const struct pseudo_fs_ops* fs_ops;
-    const struct pseudo_dir* dir;  /* NULL if pseudo-FS entry is a file */
+    const struct pseudo_dir* dir; /* NULL if pseudo-FS entry is a file */
     int type; /* LINUX_DT_REG, LINUX_DT_CHR, etc (if dir != NULL, then always LINUX_DT_DIR) */
 };
 
