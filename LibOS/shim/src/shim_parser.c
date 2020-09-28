@@ -23,6 +23,7 @@
 #include "pal.h"
 #include "pal_error.h"
 #include "shim_internal.h"
+#include "shim_syscalls.h"
 #include "shim_table.h"
 #include "shim_tcb.h"
 #include "shim_thread.h"
@@ -49,7 +50,9 @@ static void parse_ioctlop(va_list*);
 static void parse_fcntlop(va_list*);
 static void parse_seek(va_list*);
 static void parse_at_fdcwd(va_list*);
-static void parse_wait_option(va_list*);
+static void parse_wait_options(va_list*);
+static void parse_waitid_which(va_list*);
+static void parse_getrandom_flags(va_list*);
 
 struct parser_table {
     int slow;
@@ -122,7 +125,7 @@ struct parser_table {
         [__NR_execve]   = {.slow   = 1,
                            .parser = {NULL, &parse_exec_args, &parse_exec_envp}},
         [__NR_exit]     = {.slow = 0, .parser = {NULL}},
-        [__NR_wait4]    = {.slow = 1, .parser = {NULL, NULL, &parse_wait_option, NULL}},
+        [__NR_wait4]    = {.slow = 1, .parser = {NULL, NULL, &parse_wait_options, NULL}},
         [__NR_kill]     = {.slow = 0, .parser = {NULL, &parse_signum, }},
         [__NR_uname]    = {.slow = 0, .parser = {NULL}},
         [__NR_semget]   = {.slow = 0, .parser = {NULL}},
@@ -320,7 +323,8 @@ struct parser_table {
         [__NR_mq_notify]       = {.slow = 0, .parser = {NULL}},
         [__NR_mq_getsetattr]   = {.slow = 0, .parser = {NULL}},
         [__NR_kexec_load]      = {.slow = 0, .parser = {NULL}},
-        [__NR_waitid]      = {.slow = 1, .parser = {NULL}},
+        [__NR_waitid]      = {.slow   = 1,
+                              .parser = {&parse_waitid_which, NULL, NULL, &parse_wait_options, NULL}},
         [__NR_add_key]     = {.slow = 0, .parser = {NULL}},
         [__NR_request_key] = {.slow = 0, .parser = {NULL}},
         [__NR_keyctl]      = {.slow = 0, .parser = {NULL}},
@@ -375,6 +379,35 @@ struct parser_table {
         [__NR_perf_event_open]   = {.slow = 0, .parser = {NULL}},
         [__NR_recvmmsg]          = {.slow = 0, .parser = {NULL}},
         [__NR_getcpu]        = {.slow = 0, .parser = {NULL}},
+        [__NR_process_vm_readv]  = {.slow = 0, .parser = {NULL}},
+        [__NR_process_vm_writev] = {.slow = 0, .parser = {NULL}},
+        [__NR_kcmp]              = {.slow = 0, .parser = {NULL}},
+        [__NR_finit_module]      = {.slow = 0, .parser = {NULL}},
+        [__NR_sched_setattr]     = {.slow = 0, .parser = {NULL}},
+        [__NR_sched_getattr]     = {.slow = 0, .parser = {NULL}},
+        [__NR_renameat2]         = {.slow = 0, .parser = {NULL}},
+        [__NR_seccomp]           = {.slow = 0, .parser = {NULL}},
+        [__NR_getrandom]         = {.slow = 0, .parser = {NULL, NULL, parse_getrandom_flags}},
+        [__NR_memfd_create]      = {.slow = 0, .parser = {NULL}},
+        [__NR_kexec_file_load]   = {.slow = 0, .parser = {NULL}},
+        [__NR_bpf]               = {.slow = 0, .parser = {NULL}},
+        [__NR_execveat]          = {.slow = 0, .parser = {NULL}},
+        [__NR_userfaultfd]       = {.slow = 0, .parser = {NULL}},
+        [__NR_membarrier]        = {.slow = 0, .parser = {NULL}},
+        [__NR_mlock2]            = {.slow = 0, .parser = {NULL}},
+        [__NR_copy_file_range]   = {.slow = 0, .parser = {NULL}},
+        [__NR_preadv2]           = {.slow = 0, .parser = {NULL}},
+        [__NR_pwritev2]          = {.slow = 0, .parser = {NULL}},
+        [__NR_pkey_mprotect]     = {.slow = 0, .parser = {NULL}},
+        [__NR_pkey_alloc]        = {.slow = 0, .parser = {NULL}},
+        [__NR_pkey_free]         = {.slow = 0, .parser = {NULL}},
+        [__NR_statx]             = {.slow = 0, .parser = {NULL}},
+        [__NR_io_pgetevents]     = {.slow = 0, .parser = {NULL}},
+        [__NR_rseq]              = {.slow = 0, .parser = {NULL}},
+        [__NR_pidfd_send_signal] = {.slow = 0, .parser = {NULL}},
+        [__NR_io_uring_setup]    = {.slow = 0, .parser = {NULL}},
+        [__NR_io_uring_enter]    = {.slow = 0, .parser = {NULL}},
+        [__NR_io_uring_register] = {.slow = 0, .parser = {NULL}},
 };
 
 #define S(sig) #sig
@@ -449,6 +482,32 @@ static inline int is_pointer(const char* type) {
     do {                        \
         debug_vprintf(fmt, ap); \
     } while (0)
+
+struct flag_table {
+    const char *name;
+    int flag;
+};
+
+static int parse_flags(int flags, const struct flag_table* all_flags, size_t count) {
+    if (!flags) {
+        PUTCH('0');
+        return 0;
+    }
+
+    bool first = true;
+    for (size_t i = 0; i < count; i++)
+        if (flags & all_flags[i].flag) {
+            if (first)
+                first = false;
+            else
+                PUTCH('|');
+
+            PUTS(all_flags[i].name);
+            flags &= ~all_flags[i].flag;
+        }
+
+    return flags;
+}
 
 static inline void parse_string_arg(va_list* ap) {
     va_list ap_test_arg;
@@ -649,10 +708,7 @@ static void parse_clone_flags(va_list* ap) {
 
 #define FLG(n) \
     { "CLONE_" #n, CLONE_##n, }
-    const struct {
-        const char* name;
-        int flag;
-    } all_flags[] = {
+    const struct flag_table all_flags[] = {
         FLG(VM),
         FLG(FS),
         FLG(FILES),
@@ -678,16 +734,7 @@ static void parse_clone_flags(va_list* ap) {
     };
 #undef FLG
 
-    bool printed = false;
-    for (size_t i = 0; i < ARRAY_SIZE(all_flags); i++)
-        if (flags & all_flags[i].flag) {
-            if (printed)
-                PUTCH('|');
-            else
-                printed = true;
-            PUTS(all_flags[i].name);
-            flags &= ~all_flags[i].flag;
-        }
+    flags = parse_flags(flags, all_flags, ARRAY_SIZE(all_flags));
 
 #define CLONE_SIGNAL_MASK 0xff
     int exit_signal = flags & CLONE_SIGNAL_MASK;
@@ -1312,9 +1359,61 @@ static void parse_at_fdcwd(va_list* ap) {
     }
 }
 
-static void parse_wait_option(va_list* ap) {
-    int option = va_arg(*ap, int);
+static void parse_wait_options(va_list* ap) {
+    int flags = va_arg(*ap, int);
 
-    if (option & WNOHANG)
-        PUTS("WNOHANG");
+#define FLG(n) { #n, n }
+    const struct flag_table all_flags[] = {
+        FLG(WNOHANG),
+        FLG(WNOWAIT),
+        FLG(WEXITED),
+        FLG(WSTOPPED),
+        FLG(WCONTINUED),
+        FLG(WUNTRACED),
+    };
+#undef FLG
+
+    flags = parse_flags(flags, all_flags, ARRAY_SIZE(all_flags));
+    if (flags)
+        PRINTF("|0x%x", flags);
+}
+
+static void parse_waitid_which(va_list* ap) {
+    int which = va_arg(*ap, int);
+
+    switch (which) {
+        case P_ALL:
+            PUTS("P_ALL");
+            break;
+        case P_PID:
+            PUTS("P_PID");
+            break;
+        case P_PGID:
+            PUTS("P_PGID");
+            break;
+#ifdef P_PIDFD
+        case P_PIDFD:
+            PUTS("P_PIDFD");
+            break;
+#endif
+        default:
+            PRINTF("%d", which);
+            break;
+    }
+}
+
+static void parse_getrandom_flags(va_list* ap) {
+    unsigned int flags = va_arg(*ap, unsigned int);
+
+#define FLG(n) { #n, n }
+    const struct flag_table all_flags[] = {
+        FLG(GRND_NONBLOCK),
+        FLG(GRND_RANDOM),
+        FLG(GRND_INSECURE),
+    };
+#undef FLG
+
+    flags = parse_flags(flags, all_flags, ARRAY_SIZE(all_flags));
+    if (flags)
+        PRINTF("|0x%x", flags);
 }

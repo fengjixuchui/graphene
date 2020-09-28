@@ -21,7 +21,7 @@
 #include "shim_table.h"
 #include "shim_thread.h"
 #include "shim_ucontext-arch.h"
-#include "shim_unistd.h"
+#include "shim_types.h"
 #include "shim_utils.h"
 #include "shim_vma.h"
 
@@ -843,8 +843,6 @@ int append_signal(struct shim_thread* thread, siginfo_t* info) {
      * delivered, just the queue was full. */
     return 0;
 }
-
-#define __WCOREDUMP_BIT 0x80
 
 static void sighandler_kill(int sig, siginfo_t* info, void* ucontext) {
     __UNUSED(info);

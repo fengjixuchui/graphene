@@ -17,13 +17,17 @@ CFLAGS += \
 	-Iprotected-files \
 	-Isgx-driver
 
+# Some of the code uses alignof on expressions, which is a GNU extension.
+# Silence Clang - it complains but does support it.
+CFLAGS += -Wno-gnu-alignof-expression
+
 ASFLAGS += \
 	-I. \
 	-I../.. \
 	-I../../../include \
 	-I../../../include/arch/$(ARCH)/Linux
 
-host_files = libpal-Linux-SGX.a pal-sgx debugger/sgx_gdb.so pal.map generated_offsets.py
+host_files = libpal-Linux-SGX.a pal-sgx gdb_integration/sgx_gdb.so pal.map generated_offsets.py
 
 defs	= -DIN_PAL
 CFLAGS += $(defs)
@@ -73,7 +77,7 @@ urts-objs = \
 	sgx_main.o \
 	sgx_platform.o \
 	sgx_process.o \
-	sgx_rtld.o \
+	sgx_gdb_info.o \
 	sgx_thread.o \
 	quote/aesm.pb-c.o \
 	$(commons_objs_urts)
@@ -125,9 +129,9 @@ quote/aesm.pb-c.c quote/aesm.pb-c.h: quote/aesm.proto
 	@echo [ host/Linux-SGX/quote/aesm.pb-c.h ]
 	@protoc-c --c_out=. $<
 
-debugger/sgx_gdb.so: CFLAGS =
-CFLAGS-debugger/sgx_gdb.so = -shared -Wall -fPIC -O2 -std=c11
-debugger/sgx_gdb.so: debugger/sgx_gdb.c
+gdb_integration/sgx_gdb.so: CFLAGS =
+CFLAGS-gdb_integration/sgx_gdb.so = -shared -Wall -fPIC -O2 -std=c11
+gdb_integration/sgx_gdb.so: gdb_integration/sgx_gdb.c
 	$(call cmd,csingle)
 
 enclave_entry.o sgx_entry.o: asm-offsets.h
@@ -136,7 +140,7 @@ sgx-driver/sgx.h:
 	$(MAKE) -C sgx-driver $(notdir $@)
 
 ifeq ($(filter %clean,$(MAKECMDGOALS)),)
-include $(wildcard *.d) $(wildcard debugger/*.d)
+include $(wildcard *.d) $(wildcard gdb_integration/*.d)
 endif
 
 include ../../../../Scripts/Makefile.rules
@@ -146,13 +150,13 @@ tools:
 	$(MAKE) -C tools
 
 CLEAN_FILES += $(notdir $(pal_static) $(pal_lib) $(pal_loader))
-CLEAN_FILES += debugger/sgx_gdb.so
+CLEAN_FILES += gdb_integration/sgx_gdb.so
 CLEAN_FILES += quote/aesm.pb-c.c quote/aesm.pb-c.h quote/aesm.pb-c.d quote/aesm.pb-c.o
 
 .PHONY: clean_
 clean_:
-	$(RM) -r *.o *.e *.i *.s $(host_files) $(CLEAN_FILES) *.d debugger/*.d signer/*.pyc __pycache__ \
-	         signer/__pycache__
+	$(RM) -r *.o *.e *.i *.s $(host_files) $(CLEAN_FILES) *.d gdb_integration/*.d signer/*.pyc \
+	         __pycache__ signer/__pycache__
 	$(RM) -r protected-files/*.o protected-files/*.d
 
 .PHONY: clean

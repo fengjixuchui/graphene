@@ -1,5 +1,8 @@
 /* SPDX-License-Identifier: LGPL-3.0-or-later */
-/* Copyright (C) 2014 Stony Brook University */
+/* Copyright (C) 2014 Stony Brook University
+ * Copyright (C) 2020 Intel Corporation
+ *                    Michał Kowalczyk <mkow@invisiblethingslab.com>
+ */
 
 /*
  * shim_syscalls.c
@@ -20,7 +23,7 @@
 #include "shim_table.h"
 #include "shim_tcb.h"
 #include "shim_thread.h"
-#include "shim_unistd.h"
+#include "shim_types.h"
 #include "shim_utils.h"
 
 //////////////////////////////////////////////////
@@ -307,8 +310,12 @@ DEFINE_SHIM_SYSCALL(execve, 3, shim_do_execve, int, const char*, file, const cha
 /* exit: sys/shim_exit.c */
 DEFINE_SHIM_SYSCALL(exit, 1, shim_do_exit, int, int, error_code)
 
+/* waitid: sys/shim_wait.c */
+DEFINE_SHIM_SYSCALL(waitid, 5, shim_do_waitid, long, int, which, pid_t, id, siginfo_t*, infop,
+                    int, options, struct __kernel_rusage*, ru)
+
 /* wait4: sys/shim_wait.c */
-DEFINE_SHIM_SYSCALL(wait4, 4, shim_do_wait4, pid_t, pid_t, pid, int*, stat_addr, int, option,
+DEFINE_SHIM_SYSCALL(wait4, 4, shim_do_wait4, long, pid_t, pid, int*, stat_addr, int, options,
                     struct __kernel_rusage*, ru)
 
 /* kill: sys/shim_sigaction.c */
@@ -840,9 +847,6 @@ SHIM_SYSCALL_RETURN_ENOSYS(kexec_load, 4, int, unsigned long, entry, unsigned lo
                            struct kexec_segment*, segments, unsigned long, flags)
 */
 
-SHIM_SYSCALL_RETURN_ENOSYS(waitid, 5, int, int, which, pid_t, pid, siginfo_t*, infop, int, options,
-                           struct __kernel_rusage*, ru)
-
 /*
 SHIM_SYSCALL_RETURN_ENOSYS(add_key, 5, int, const char*, type, const char*, description,
                            const void*, payload, size_t, plen, key_serial_t, destringid)
@@ -1031,3 +1035,84 @@ SHIM_SYSCALL_RETURN_ENOSYS(setns, 2, int, int, fd, int, nstype)
 
 DEFINE_SHIM_SYSCALL(getcpu, 3, shim_do_getcpu, int, unsigned*, cpu, unsigned*, node,
                     struct getcpu_cache*, cache)
+
+SHIM_SYSCALL_RETURN_ENOSYS(process_vm_readv, 6, long, pid_t, pid, const struct iovec*, lvec,
+                           unsigned long, liovcnt, const struct iovec*, rvec, unsigned long,
+                           riovcnt, unsigned long, flags);
+
+SHIM_SYSCALL_RETURN_ENOSYS(process_vm_writev, 6, long, pid_t, pid, const struct iovec*, lvec,
+                           unsigned long, liovcnt, const struct iovec*, rvec,
+                           unsigned long, riovcnt, unsigned long, flags)
+
+SHIM_SYSCALL_RETURN_ENOSYS(kcmp, 5, long, pid_t, pid1, pid_t, pid2, int, type, unsigned long, idx1,
+                           unsigned long, idx2)
+
+SHIM_SYSCALL_RETURN_ENOSYS(finit_module, 3, long, int, fd, const char*, uargs, int, flags)
+
+SHIM_SYSCALL_RETURN_ENOSYS(sched_setattr, 3, long, pid_t, pid, struct sched_attr*, uattr,
+                           unsigned int, flags)
+
+SHIM_SYSCALL_RETURN_ENOSYS(sched_getattr, 4, long, pid_t, pid, struct sched_attr*, uattr,
+                           unsigned int, usize, unsigned int, flags)
+
+SHIM_SYSCALL_RETURN_ENOSYS(renameat2, 5, long, int, olddfd, const char*, oldname, int, newdfd,
+                           const char*, newname, unsigned int, flags)
+
+SHIM_SYSCALL_RETURN_ENOSYS(seccomp, 3, long, unsigned int, op, unsigned int, flags, void*, uargs)
+
+DEFINE_SHIM_SYSCALL(getrandom, 3, shim_do_getrandom, long, char*, buf, size_t, count, unsigned int,
+                    flags)
+
+SHIM_SYSCALL_RETURN_ENOSYS(memfd_create, 2, long, const char*, uname, unsigned int, flags)
+
+SHIM_SYSCALL_RETURN_ENOSYS(kexec_file_load, 5, long, int, kernel_fd, int, initrd_fd, unsigned long,
+                           cmdline_len, const char*, cmdline_ptr, unsigned long, flags)
+
+SHIM_SYSCALL_RETURN_ENOSYS(bpf, 3, long, int, cmd, union bpf_attr*, uattr, unsigned int, size)
+
+SHIM_SYSCALL_RETURN_ENOSYS(execveat, 5, long, int, fd, const char*, filename, const char* const*,
+                           argv, const char* const*, envp, int, flags)
+
+SHIM_SYSCALL_RETURN_ENOSYS(userfaultfd, 1, long, int, flags)
+
+SHIM_SYSCALL_RETURN_ENOSYS(membarrier, 2, long, int, cmd, int, flags)
+
+SHIM_SYSCALL_RETURN_ENOSYS(mlock2, 3, long, unsigned long, start, size_t, len, int, flags)
+
+SHIM_SYSCALL_RETURN_ENOSYS(copy_file_range, 6, long, int, fd_in, loff_t*, off_in, int, fd_out,
+                           loff_t*, off_out, size_t, len, unsigned int, flags)
+
+SHIM_SYSCALL_RETURN_ENOSYS(preadv2, 6, long, unsigned long, fd, const struct iovec*, vec,
+                           unsigned long, vlen, unsigned long, pos_l, unsigned long, pos_h, rwf_t,
+                           flags)
+
+SHIM_SYSCALL_RETURN_ENOSYS(pwritev2, 6, long, unsigned long, fd, const struct iovec*, vec,
+                           unsigned long, vlen, unsigned long, pos_l, unsigned long, pos_h, rwf_t,
+                           flags)
+
+SHIM_SYSCALL_RETURN_ENOSYS(pkey_mprotect, 4, long, unsigned long, start, size_t, len, unsigned long,
+                           prot, int, pkey)
+
+SHIM_SYSCALL_RETURN_ENOSYS(pkey_alloc, 2, long, unsigned long, flags, unsigned long, init_val)
+
+SHIM_SYSCALL_RETURN_ENOSYS(pkey_free, 1, long, int, pkey)
+
+SHIM_SYSCALL_RETURN_ENOSYS(statx, 5, long, int, dfd, const char*, filename, unsigned, flags,
+                           unsigned int, mask, struct statx*, buffer)
+
+SHIM_SYSCALL_RETURN_ENOSYS(io_pgetevents, 6, long, aio_context_t, ctx_id, long, min_nr, long, nr,
+                           struct io_event*, events, struct __kernel_timespec*, timeout,
+                           const struct __aio_sigset*, usig)
+
+SHIM_SYSCALL_RETURN_ENOSYS(rseq, 4, long, struct rseq*, rseq, u32, rseq_len, int, flags, u32, sig)
+
+SHIM_SYSCALL_RETURN_ENOSYS(pidfd_send_signal, 4, long, int, pidfd, int, sig, siginfo_t*, info,
+                           unsigned int, flags)
+
+SHIM_SYSCALL_RETURN_ENOSYS(io_uring_setup, 2, long, u32, entries, struct io_uring_params*, params)
+
+SHIM_SYSCALL_RETURN_ENOSYS(io_uring_enter, 6, long, unsigned int, fd, u32, to_submit, u32,
+                           min_complete, u32, flags, const sigset_t*, sig, size_t, sigsz)
+
+SHIM_SYSCALL_RETURN_ENOSYS(io_uring_register, 4, long, unsigned int, fd, unsigned int, opcode,
+                           void*, arg, unsigned int, nr_args)

@@ -18,6 +18,14 @@ CFLAGS += -fPIC -Winline -Wwrite-strings \
 
 CFLAGS += -Wextra
 
+# Some of the code uses alignof on expressions, which is a GNU extension.
+# Silence Clang - it complains but does support it.
+CFLAGS += -Wno-gnu-alignof-expression
+
+# TODO: This is due to use of packed structs in IPC code, which triggers "taking address of a packed
+# member" warning in Clang and newer GCC. That code needs to be rewritten.
+CFLAGS += -Wno-address-of-packed-member
+
 ASFLAGS += -Wa,--noexecstack -x assembler-with-cpp -I../include
 
 LDFLAGS += -shared -nostdlib -z combreloc -z relro -z now -z defs \
@@ -89,6 +97,7 @@ objs = \
 	sys/shim_futex.o \
 	sys/shim_getcwd.o \
 	sys/shim_getpid.o \
+	sys/shim_getrandom.o \
 	sys/shim_getrlimit.o \
 	sys/shim_ioctl.o \
 	sys/shim_mmap.o \
