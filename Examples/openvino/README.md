@@ -24,7 +24,7 @@ For Ubuntu 18.04, install the following prerequisite packages:
 * Install CMake version >= 3.11 (on Ubuntu 18.04, this may require installing
   Cmake from a non-official APT repository like Kitware).
 
-* Install libusb version >= 1.0.0.
+* Install libusb version >= 1.0.0 (`sudo apt install libusb-1.0-0-dev`).
 
 * Install libtbb-dev
 
@@ -41,13 +41,16 @@ make SGX=1
 
 # run original OpenVINO/object_detection_sample_ssd
 # note that this assumes the Release build of OpenVINO (no DEBUG=1)
-./openvino/bin/intel64/Release/object_detection_sample_ssd -i images/horses.jpg -m model/VGG_VOC0712Plus_SSD_300x300_ft_iter_160000.xml -d CPU
+./openvino/bin/intel64/Release/object_detection_sample_ssd -i images/horses.jpg \
+    -m model/VGG_VOC0712Plus_SSD_300x300_ft_iter_160000.xml -d CPU
 
 # run OpenVINO/object_detection_sample_ssd in non-SGX Graphene
-./pal_loader openvino.manifest -i images/horses.jpg -m model/VGG_VOC0712Plus_SSD_300x300_ft_iter_160000.xml -d CPU
+./pal_loader object_detection_sample_ssd.manifest -i images/horses.jpg \
+    -m model/VGG_VOC0712Plus_SSD_300x300_ft_iter_160000.xml -d CPU
 
 # run OpenVINO/object_detection_sample_ssd in Graphene-SGX
-SGX=1 ./pal_loader openvino.manifest.sgx -i images/horses.jpg -m model/VGG_VOC0712Plus_SSD_300x300_ft_iter_160000.xml -d CPU
+SGX=1 ./pal_loader object_detection_sample_ssd.manifest.sgx -i images/horses.jpg \
+    -m model/VGG_VOC0712Plus_SSD_300x300_ft_iter_160000.xml -d CPU
 
 # Each of these commands produces an image out_0.bmp with detected objects
 xxd out_0.bmp   # or open in any image editor

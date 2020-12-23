@@ -2,11 +2,13 @@
 /* Copyright (C) 2014 Stony Brook University */
 
 /*
- * db_pipes.c
- *
- * This file contains oeprands to handle streams with URIs that start with
- * "pipe:" or "pipe.srv:".
+ * This file contains operands to handle streams with URIs that start with "pipe:" or "pipe.srv:".
  */
+
+#include <asm/fcntl.h>
+#include <asm/poll.h>
+#include <linux/types.h>
+#include <linux/un.h>
 
 #include "api.h"
 #include "cpu.h"
@@ -21,11 +23,6 @@
 #include "pal_linux_error.h"
 #include "pal_security.h"
 
-typedef __kernel_pid_t pid_t;
-#include <asm/fcntl.h>
-#include <asm/poll.h>
-#include <linux/types.h>
-#include <linux/un.h>
 
 static int pipe_addr(const char* name, struct sockaddr_un* addr) {
     /* use abstract UNIX sockets for pipes, with name format "@/graphene/<pipename>" */
@@ -348,16 +345,16 @@ static int pipe_open(PAL_HANDLE* handle, const char* type, const char* uri, int 
         !WITHIN_MASK(create, PAL_CREATE_MASK) || !WITHIN_MASK(options, PAL_OPTION_MASK))
         return -PAL_ERROR_INVAL;
 
-    if (!strcmp_static(type, URI_TYPE_PIPE) && !*uri)
+    if (!strcmp(type, URI_TYPE_PIPE) && !*uri)
         return pipe_private(handle, options);
 
     if (strlen(uri) + 1 > PIPE_NAME_MAX)
         return -PAL_ERROR_INVAL;
 
-    if (!strcmp_static(type, URI_TYPE_PIPE_SRV))
+    if (!strcmp(type, URI_TYPE_PIPE_SRV))
         return pipe_listen(handle, uri, options);
 
-    if (!strcmp_static(type, URI_TYPE_PIPE))
+    if (!strcmp(type, URI_TYPE_PIPE))
         return pipe_connect(handle, uri, options);
 
     return -PAL_ERROR_INVAL;
@@ -389,7 +386,7 @@ static int64_t pipe_read(PAL_HANDLE handle, uint64_t offset, uint64_t len, void*
     } else {
         /* normal pipe, use a secure session (should be already initialized) */
         while (!__atomic_load_n(&handle->pipe.handshake_done, __ATOMIC_ACQUIRE))
-            cpu_pause();
+            CPU_RELAX();
 
         if (!handle->pipe.ssl_ctx)
             return -PAL_ERROR_NOTCONNECTION;
@@ -429,7 +426,7 @@ static int64_t pipe_write(PAL_HANDLE handle, uint64_t offset, uint64_t len, cons
     } else {
         /* normal pipe, use a secure session (should be already initialized) */
         while (!__atomic_load_n(&handle->pipe.handshake_done, __ATOMIC_ACQUIRE))
-            cpu_pause();
+            CPU_RELAX();
 
         if (!handle->pipe.ssl_ctx)
             return -PAL_ERROR_NOTCONNECTION;
@@ -458,7 +455,7 @@ static int pipe_close(PAL_HANDLE handle) {
         }
     } else if (handle->pipe.fd != PAL_IDX_POISON) {
         while (!__atomic_load_n(&handle->pipe.handshake_done, __ATOMIC_ACQUIRE))
-            cpu_pause();
+            CPU_RELAX();
 
         if (handle->pipe.ssl_ctx) {
             _DkStreamSecureFree((LIB_SSL_CONTEXT*)handle->pipe.ssl_ctx);
@@ -506,6 +503,11 @@ static int pipe_delete(PAL_HANDLE handle, int access) {
             ocall_shutdown(handle->pipeprv.fds[1], SHUT_WR);
         }
     } else {
+        /* This pipe might use a secure session, make sure all initial work is done. */
+        while (!__atomic_load_n(&handle->pipe.handshake_done, __ATOMIC_ACQUIRE)) {
+            CPU_RELAX();
+        }
+
         /* other types of pipes have a single underlying FD, shut it down */
         if (handle->pipe.fd != PAL_IDX_POISON) {
             ocall_shutdown(handle->pipe.fd, shutdown);
@@ -555,6 +557,11 @@ static int pipe_attrquerybyhdl(PAL_HANDLE handle, PAL_STREAM_ATTR* attr) {
         attr->readable = ret >= 1 && (pfd[0].revents & (POLLIN | POLLERR | POLLHUP)) == POLLIN;
         attr->writable = ret >= 1 && (pfd[1].revents & (POLLOUT | POLLERR | POLLHUP)) == POLLOUT;
     } else {
+        /* This pipe might use a secure session, make sure all initial work is done. */
+        while (!__atomic_load_n(&handle->pipe.handshake_done, __ATOMIC_ACQUIRE)) {
+            CPU_RELAX();
+        }
+
         /* for non-private pipes, both readable and writable are queried on the same fd */
         short pfd_events = POLLIN;
         if (!IS_HANDLE_TYPE(handle, pipesrv)) {
@@ -586,6 +593,13 @@ static int pipe_attrquerybyhdl(PAL_HANDLE handle, PAL_STREAM_ATTR* attr) {
 static int pipe_attrsetbyhdl(PAL_HANDLE handle, PAL_STREAM_ATTR* attr) {
     if (handle->generic.fds[0] == PAL_IDX_POISON)
         return -PAL_ERROR_BADHANDLE;
+
+    if (!IS_HANDLE_TYPE(handle, pipeprv)) {
+        /* This pipe might use a secure session, make sure all initial work is done. */
+        while (!__atomic_load_n(&handle->pipe.handshake_done, __ATOMIC_ACQUIRE)) {
+            CPU_RELAX();
+        }
+    }
 
     PAL_BOL* nonblocking = (HANDLE_HDR(handle)->type == pal_type_pipeprv)
                                ? &handle->pipeprv.nonblocking

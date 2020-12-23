@@ -2,16 +2,14 @@
 /* Copyright (C) 2014 Stony Brook University */
 
 /*
- * db_process.c
- *
- * This source file contains functions to create a child process and terminate
- * the running process. Child does not inherit any objects or memory from its
- * parent pricess. A Parent process may not modify the execution of its
- * children. It can wait for a child to exit using its handle. Also, parent and
- * child may communicate through I/O streams provided by the parent to the child
- * at creation.
+ * This source file contains functions to create a child process and terminate the running process.
+ * Child does not inherit any objects or memory from its parent process. A parent process may not
+ * modify the execution of its children. It can wait for a child to exit using its handle. Also,
+ * parent and child may communicate through I/O streams provided by the parent to the child at
+ * creation.
  */
 
+#include <asm/fcntl.h>
 #include <linux/fs.h>
 #include <linux/sched.h>
 #include <linux/types.h>
@@ -29,8 +27,6 @@
 #include "pal_security.h"
 #include "protected-files/protected_files.h"
 #include "spinlock.h"
-typedef __kernel_pid_t pid_t;
-#include <asm/fcntl.h>
 
 DEFINE_LIST(trusted_child);
 struct trusted_child {
@@ -233,7 +229,7 @@ static int check_child_mr_enclave(PAL_HANDLE child, sgx_measurement_t* mr_enclav
 
 int _DkProcessCreate(PAL_HANDLE* handle, const char* uri, const char** args) {
     /* only access creating process with regular file */
-    if (!strstartswith_static(uri, URI_PREFIX_FILE))
+    if (!strstartswith(uri, URI_PREFIX_FILE))
         return -PAL_ERROR_INVAL;
 
     unsigned int child_pid;
@@ -245,8 +241,8 @@ int _DkProcessCreate(PAL_HANDLE* handle, const char* uri, const char** args) {
             nargs++;
 
     ret = ocall_create_process(uri, nargs, args, &stream_fd, &child_pid);
-    if (ret < 0)
-        return ret;
+    if (IS_ERR(ret))
+        return unix_to_pal_error(ERRNO(ret));
 
     PAL_HANDLE child = malloc(HANDLE_SIZE(process));
     SET_HANDLE_TYPE(child, process);
@@ -254,6 +250,7 @@ int _DkProcessCreate(PAL_HANDLE* handle, const char* uri, const char** args) {
     child->process.stream      = stream_fd;
     child->process.pid         = child_pid;
     child->process.nonblocking = PAL_FALSE;
+    child->process.is_server   = true;
     child->process.ssl_ctx     = NULL;
 
     ret = _DkStreamKeyExchange(child, &child->process.session_key);
@@ -270,7 +267,7 @@ int _DkProcessCreate(PAL_HANDLE* handle, const char* uri, const char** args) {
     if (ret < 0)
         goto failed;
 
-    ret = _DkStreamSecureInit(child, /*is_server=*/true, &child->process.session_key,
+    ret = _DkStreamSecureInit(child, child->process.is_server, &child->process.session_key,
                               (LIB_SSL_CONTEXT**)&child->process.ssl_ctx, NULL, 0);
     if (ret < 0)
         goto failed;
@@ -329,6 +326,7 @@ int init_child_process(PAL_HANDLE* parent_handle) {
     parent->process.stream      = g_pal_sec.stream_fd;
     parent->process.pid         = g_pal_sec.ppid;
     parent->process.nonblocking = PAL_FALSE;
+    parent->process.is_server   = false;
     parent->process.ssl_ctx     = NULL;
 
     int ret = _DkStreamKeyExchange(parent, &parent->process.session_key);
@@ -345,7 +343,7 @@ int init_child_process(PAL_HANDLE* parent_handle) {
     if (ret < 0)
         return ret;
 
-    ret = _DkStreamSecureInit(parent, /*is_server=*/false, &parent->process.session_key,
+    ret = _DkStreamSecureInit(parent, parent->process.is_server, &parent->process.session_key,
                               (LIB_SSL_CONTEXT**)&parent->process.ssl_ctx, NULL, 0);
     if (ret < 0)
         return ret;
@@ -468,7 +466,6 @@ static int proc_attrquerybyhdl(PAL_HANDLE handle, PAL_STREAM_ATTR* attr) {
     attr->handle_type  = HANDLE_HDR(handle)->type;
     attr->nonblocking  = handle->process.nonblocking;
     attr->disconnected = HANDLE_HDR(handle)->flags & ERROR(0);
-    attr->secure       = handle->process.ssl_ctx ? PAL_TRUE : PAL_FALSE;
 
     /* get number of bytes available for reading */
     ret = ocall_fionread(handle->process.stream);
@@ -498,16 +495,6 @@ static int proc_attrsetbyhdl(PAL_HANDLE handle, PAL_STREAM_ATTR* attr) {
             return unix_to_pal_error(ERRNO(ret));
 
         handle->process.nonblocking = attr->nonblocking;
-    }
-
-    if (!attr->secure && handle->process.ssl_ctx) {
-        /* remove TLS protection from process.stream */
-        _DkStreamSecureFree((LIB_SSL_CONTEXT*)handle->process.ssl_ctx);
-        handle->process.ssl_ctx = NULL;
-    } else if (attr->secure && !handle->process.ssl_ctx) {
-        /* adding TLS protection for process.stream is not yet implemented */
-        SGX_DBG(DBG_E, "Securing a non-secure process handle is not supported!\n");
-        return -PAL_ERROR_NOTSUPPORT;
     }
 
     return 0;

@@ -1,9 +1,7 @@
 /* SPDX-License-Identifier: LGPL-3.0-or-later */
 /* Copyright (C) 2014 Stony Brook University */
 
-/*!
- * \file pal-arch.h
- *
+/*
  * This file contains definition of x86_64-specific aspects of PAL.
  */
 
@@ -38,7 +36,7 @@ typedef struct pal_tcb {
 
 static inline PAL_TCB* pal_get_tcb(void) {
     PAL_TCB* tcb;
-    __asm__("movq %%gs:%c1,%q0" : "=r"(tcb) : "i"(offsetof(struct pal_tcb, self)));
+    __asm__("movq %%gs:%c1, %0" : "=r"(tcb) : "i"(offsetof(struct pal_tcb, self)) : "memory");
     return tcb;
 }
 
@@ -189,7 +187,12 @@ static inline bool pal_context_has_user_pagefault(PAL_CONTEXT* context) {
 
 /* PAL_CPU_INFO holds /proc/cpuinfo data */
 typedef struct PAL_CPU_INFO_ {
-    PAL_NUM cpu_num;
+    /* Number of logical cores available in the host */
+    PAL_NUM online_logical_cores;
+    /* Number of physical cores in a socket (physical package) */
+    PAL_NUM physical_cores_per_socket;
+    /* array of "logical core -> socket" mappings; has online_logical_cores elements */
+    int* cpu_socket;
     PAL_STR cpu_vendor;
     PAL_STR cpu_brand;
     PAL_NUM cpu_family;

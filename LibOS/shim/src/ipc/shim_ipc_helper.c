@@ -13,6 +13,7 @@
 #include "shim_handle.h"
 #include "shim_internal.h"
 #include "shim_ipc.h"
+#include "shim_lock.h"
 #include "shim_thread.h"
 #include "shim_utils.h"
 
@@ -32,12 +33,13 @@ static MEM_MGR port_mgr;
 DEFINE_LISTP(shim_ipc_port);
 static LISTP_TYPE(shim_ipc_port) port_list;
 
-static enum { HELPER_NOTALIVE, HELPER_ALIVE } ipc_helper_state;
+static enum { HELPER_NOTALIVE, HELPER_STOPPED, HELPER_ALIVE } ipc_helper_state = HELPER_NOTALIVE;
 
 static struct shim_thread* ipc_helper_thread;
 static struct shim_lock ipc_helper_lock;
 
 static AEVENTTYPE install_new_event;
+static AEVENTTYPE helper_stopped_event;
 
 static int create_ipc_helper(void);
 static int ipc_resp_callback(struct shim_ipc_msg* msg, struct shim_ipc_port* port);
@@ -73,80 +75,80 @@ static ipc_callback ipc_callbacks[] = {
 };
 
 static int init_self_ipc_port(void) {
-    lock(&cur_process.lock);
+    lock(&g_process_ipc_info.lock);
 
-    if (!cur_process.self) {
+    if (!g_process_ipc_info.self) {
         /* very first process or clone/fork case: create IPC port from scratch */
-        cur_process.self = create_ipc_info_cur_process(/*is_self_ipc_info=*/true);
-        if (!cur_process.self) {
-            unlock(&cur_process.lock);
+        g_process_ipc_info.self = create_ipc_info_and_port(/*use_vmid_as_port_name=*/true);
+        if (!g_process_ipc_info.self) {
+            unlock(&g_process_ipc_info.lock);
             return -EACCES;
         }
     } else {
         /* execve case: inherited IPC port from parent process */
-        assert(cur_process.self->pal_handle && !qstrempty(&cur_process.self->uri));
+        assert(g_process_ipc_info.self->pal_handle && !qstrempty(&g_process_ipc_info.self->uri));
 
-        add_ipc_port_by_id(cur_process.self->vmid, cur_process.self->pal_handle, IPC_PORT_SERVER,
-                           /*fini=*/NULL, &cur_process.self->port);
+        add_ipc_port_by_id(g_process_ipc_info.self->vmid, g_process_ipc_info.self->pal_handle,
+                           IPC_PORT_LISTENING, /*fini=*/NULL, &g_process_ipc_info.self->port);
     }
 
-    unlock(&cur_process.lock);
+    unlock(&g_process_ipc_info.lock);
     return 0;
 }
 
 static int init_parent_ipc_port(void) {
-    if (!PAL_CB(parent_process) || !cur_process.parent) {
+    if (!PAL_CB(parent_process) || !g_process_ipc_info.parent) {
         /* no parent process, no sense in creating parent IPC port */
         return 0;
     }
 
-    lock(&cur_process.lock);
-    assert(cur_process.parent && cur_process.parent->vmid);
+    lock(&g_process_ipc_info.lock);
+    assert(g_process_ipc_info.parent && g_process_ipc_info.parent->vmid);
 
     /* for execve case, my parent is the parent of my parent (current process transparently inherits
      * the "real" parent through already opened pal_handle on "temporary" parent's
-     * cur_process.parent) */
-    if (!cur_process.parent->pal_handle) {
+     * g_process_ipc_info.parent) */
+    if (!g_process_ipc_info.parent->pal_handle) {
         /* for clone/fork case, parent is connected on parent_process */
-        cur_process.parent->pal_handle = PAL_CB(parent_process);
+        g_process_ipc_info.parent->pal_handle = PAL_CB(parent_process);
     }
 
-    add_ipc_port_by_id(cur_process.parent->vmid, cur_process.parent->pal_handle,
-                       IPC_PORT_DIRECTPARENT | IPC_PORT_LISTEN,
-                       /*fini=*/NULL, &cur_process.parent->port);
+    add_ipc_port_by_id(g_process_ipc_info.parent->vmid, g_process_ipc_info.parent->pal_handle,
+                       IPC_PORT_CONNECTION | IPC_PORT_DIRECTPARENT, /*fini=*/NULL,
+                       &g_process_ipc_info.parent->port);
 
-    unlock(&cur_process.lock);
+    unlock(&g_process_ipc_info.lock);
     return 0;
 }
 
 static int init_ns_ipc_port(void) {
-    if (!cur_process.ns) {
+    if (!g_process_ipc_info.ns) {
         /* no NS info from parent process, no sense in creating NS IPC port */
         return 0;
     }
 
-    if (!cur_process.ns->pal_handle && qstrempty(&cur_process.ns->uri)) {
+    if (!g_process_ipc_info.ns->pal_handle && qstrempty(&g_process_ipc_info.ns->uri)) {
         /* there is no connection to NS leader via PAL handle and there is no URI to find NS leader:
          * do not create NS IPC port now, it will be created on-demand during NS leader lookup */
         return 0;
     }
 
-    lock(&cur_process.lock);
+    lock(&g_process_ipc_info.lock);
 
-    if (!cur_process.ns->pal_handle) {
-        debug("Reconnecting IPC port %s\n", qstrgetstr(&cur_process.ns->uri));
-        cur_process.ns->pal_handle = DkStreamOpen(qstrgetstr(&cur_process.ns->uri), 0, 0, 0, 0);
-        if (!cur_process.ns->pal_handle) {
-            unlock(&cur_process.lock);
+    if (!g_process_ipc_info.ns->pal_handle) {
+        debug("Reconnecting IPC port %s\n", qstrgetstr(&g_process_ipc_info.ns->uri));
+        g_process_ipc_info.ns->pal_handle = DkStreamOpen(qstrgetstr(&g_process_ipc_info.ns->uri),
+                                                         0, 0, 0, 0);
+        if (!g_process_ipc_info.ns->pal_handle) {
+            unlock(&g_process_ipc_info.lock);
             return -PAL_ERRNO();
         }
     }
 
-    add_ipc_port_by_id(cur_process.ns->vmid, cur_process.ns->pal_handle,
-                       IPC_PORT_LEADER | IPC_PORT_LISTEN,
-                       /*fini=*/NULL, &cur_process.ns->port);
+    add_ipc_port_by_id(g_process_ipc_info.ns->vmid, g_process_ipc_info.ns->pal_handle,
+                       IPC_PORT_CONNECTION, /*fini=*/NULL, &g_process_ipc_info.ns->port);
 
-    unlock(&cur_process.lock);
+    unlock(&g_process_ipc_info.lock);
     return 0;
 }
 
@@ -170,18 +172,24 @@ int init_ipc_ports(void) {
 }
 
 int init_ipc_helper(void) {
-    /* early enough in init, can write global vars without the lock */
-    ipc_helper_state = HELPER_NOTALIVE;
     if (!create_lock(&ipc_helper_lock)) {
         return -ENOMEM;
     }
-    create_event(&install_new_event);
+
+    int ret = create_event(&install_new_event);
+    if (ret < 0) {
+        return ret;
+    }
+    ret = create_event(&helper_stopped_event);
+    if (ret < 0) {
+        return ret;
+    }
 
     /* some IPC ports were already added before this point, so spawn IPC helper thread (and enable
      * locking mechanisms if not done already since we are going in multi-threaded mode) */
     enable_locking();
     lock(&ipc_helper_lock);
-    int ret = create_ipc_helper();
+    ret = create_ipc_helper();
     unlock(&ipc_helper_lock);
 
     return ret;
@@ -359,7 +367,7 @@ out:
     unlock(&ipc_helper_lock);
 }
 
-void del_ipc_port_fini(struct shim_ipc_port* port, unsigned int exitcode) {
+void del_ipc_port_fini(struct shim_ipc_port* port) {
     lock(&ipc_helper_lock);
 
     if (LIST_EMPTY(port, list)) {
@@ -375,7 +383,7 @@ void del_ipc_port_fini(struct shim_ipc_port* port, unsigned int exitcode) {
 
     for (int i = 0; i < MAX_IPC_PORT_FINI_CB; i++)
         if (port->fini[i]) {
-            (port->fini[i])(port, port->vmid, exitcode);
+            (port->fini[i])(port, port->vmid);
             port->fini[i] = NULL;
         }
 
@@ -568,7 +576,7 @@ static int receive_ipc_message(struct shim_ipc_port* port) {
 
                 debug("Port %p (handle %p) closed while receiving IPC message\n", port,
                       port->pal_handle);
-                del_ipc_port_fini(port, -ECHILD);
+                del_ipc_port_fini(port);
                 ret = -PAL_ERRNO();
                 goto out;
             }
@@ -587,7 +595,7 @@ static int receive_ipc_message(struct shim_ipc_port* port) {
             msg->seq);
 
         /* skip messages coming from myself (in case of broadcast) */
-        if (msg->src != cur_process.vmid) {
+        if (msg->src != g_process_ipc_info.vmid) {
             if (msg->code < IPC_MSG_CODE_BOUND && ipc_callbacks[msg->code]) {
                 /* invoke callback to this msg */
                 ret = (*ipc_callbacks[msg->code])(msg, port);
@@ -619,6 +627,48 @@ static int receive_ipc_message(struct shim_ipc_port* port) {
     ret = 0;
 out:
     free(msg);
+    return ret;
+}
+
+int pause_ipc_helper(void) {
+    bool needs_wait = false;
+
+    lock(&ipc_helper_lock);
+    if (ipc_helper_state == HELPER_ALIVE) {
+        ipc_helper_state = HELPER_STOPPED;
+
+        int ret = clear_event(&helper_stopped_event);
+        if (ret < 0) {
+            unlock(&ipc_helper_lock);
+            return ret;
+        }
+        needs_wait = true;
+
+        /* Wake up the helper thread, so that it notices `ipc_helper_state` change. */
+        ret = set_event(&install_new_event, 1);
+        if (ret < 0) {
+            unlock(&ipc_helper_lock);
+            return ret;
+        }
+    }
+    unlock(&ipc_helper_lock);
+
+    if (needs_wait) {
+        /* Wait until the helper thread notices the stop event. */
+        return wait_event(&helper_stopped_event);
+    }
+
+    return 0;
+}
+
+int resume_ipc_helper(void) {
+    int ret = 0;
+    lock(&ipc_helper_lock);
+    if (ipc_helper_state == HELPER_STOPPED) {
+        ipc_helper_state = HELPER_ALIVE;
+        ret = set_event(&install_new_event, 1);
+    }
+    unlock(&ipc_helper_lock);
     return ret;
 }
 
@@ -676,10 +726,24 @@ noreturn static void shim_ipc_helper(void* dummy) {
 
     while (true) {
         lock(&ipc_helper_lock);
-        if (ipc_helper_state != HELPER_ALIVE) {
+
+        if (clear_event(&install_new_event) < 0) {
+            goto out_err_unlock;
+        }
+
+        if (ipc_helper_state == HELPER_NOTALIVE) {
             ipc_helper_thread = NULL;
             unlock(&ipc_helper_lock);
             break;
+        } else if (ipc_helper_state == HELPER_STOPPED) {
+            if (set_event(&helper_stopped_event, 1) < 0) {
+                goto out_err_unlock;
+            }
+            unlock(&ipc_helper_lock);
+            if (wait_event(&install_new_event) < 0) {
+                goto out_err;
+            }
+            continue;
         }
 
         /* iterate through all known ports from `port_list` to repopulate `ports` */
@@ -746,10 +810,8 @@ noreturn static void shim_ipc_helper(void* dummy) {
         for (size_t i = 0; polled && i < ports_cnt + 1; i++) {
             if (ret_events[i]) {
                 if (pals[i] == install_new_event_pal) {
-                    /* some thread wants to install new event; this event is found in `ports`, so
-                     * just re-init install_new_event */
+                    /* some thread wants to install new event; this event is found in `ports` */
                     debug("New IPC event was requested (port was added/removed)\n");
-                    clear_event(&install_new_event);
                     continue;
                 }
 
@@ -758,19 +820,17 @@ noreturn static void shim_ipc_helper(void* dummy) {
                 struct shim_ipc_port* polled_port = ports[i - 1];
                 assert(polled_port);
 
-                if (polled_port->type & IPC_PORT_SERVER) {
-                    /* server port: accept client, create client port, and add it to port list */
+                if (polled_port->type & IPC_PORT_LISTENING) {
+                    /* listening port: accept client, create port, and add it to port list */
                     PAL_HANDLE client = DkStreamWaitForClient(polled_port->pal_handle);
                     if (client) {
-                        /* type of client port is the same as original server port but with LISTEN
-                         * (for remote client) and without SERVER (doesn't wait for new clients) */
-                        IDTYPE client_type =
-                            (polled_port->type & ~IPC_PORT_SERVER) | IPC_PORT_LISTEN;
+                        IDTYPE client_type = (polled_port->type & ~IPC_PORT_LISTENING) |
+                                             IPC_PORT_CONNECTION;
                         add_ipc_port_by_id(polled_port->vmid, client, client_type, NULL, NULL);
                     } else {
                         debug("Port %p (handle %p) was removed during accepting client\n",
                               polled_port, polled_port->pal_handle);
-                        del_ipc_port_fini(polled_port, -ECHILD);
+                        del_ipc_port_fini(polled_port);
                     }
                 } else {
                     PAL_STREAM_ATTR attr;
@@ -783,12 +843,12 @@ noreturn static void shim_ipc_helper(void* dummy) {
                         if (attr.disconnected) {
                             debug("Port %p (handle %p) disconnected\n", polled_port,
                                   polled_port->pal_handle);
-                            del_ipc_port_fini(polled_port, -ECONNRESET);
+                            del_ipc_port_fini(polled_port);
                         }
                     } else {
                         debug("Port %p (handle %p) was removed during attr querying\n", polled_port,
                               polled_port->pal_handle);
-                        del_ipc_port_fini(polled_port, -PAL_ERRNO());
+                        del_ipc_port_fini(polled_port);
                     }
                 }
             }
@@ -828,16 +888,17 @@ static void shim_ipc_helper_prepare(void* arg) {
     update_fs_base(0);
 
     struct debug_buf debug_buf;
-    debug_setbuf(shim_get_tcb(), &debug_buf);
+    (void)debug_setbuf(shim_get_tcb(), &debug_buf);
 
+#ifdef DEBUG
     lock(&ipc_helper_lock);
-    bool notme = (self != ipc_helper_thread);
+    assert(self == ipc_helper_thread);
     unlock(&ipc_helper_lock);
+#endif // DEBUG
 
     void* stack = allocate_stack(IPC_HELPER_STACK_SIZE, g_pal_alloc_align, false);
 
-    if (notme || !stack) {
-        free(stack);
+    if (!stack) {
         put_thread(self);
         DkThreadExit(/*clear_child_tid=*/NULL);
         /* UNREACHABLE */
@@ -849,14 +910,13 @@ static void shim_ipc_helper_prepare(void* arg) {
     self->stack_top = stack + IPC_HELPER_STACK_SIZE;
     self->stack     = stack;
     __SWITCH_STACK(self->stack_top, shim_ipc_helper, NULL);
+    /* UNREACHABLE */
 }
 
 /* this should be called with the ipc_helper_lock held */
 static int create_ipc_helper(void) {
     assert(locked(&ipc_helper_lock));
-
-    if (ipc_helper_state == HELPER_ALIVE)
-        return 0;
+    assert(ipc_helper_state == HELPER_NOTALIVE);
 
     struct shim_thread* new = get_new_internal_thread();
     if (!new)
@@ -865,7 +925,7 @@ static int create_ipc_helper(void) {
     ipc_helper_thread = new;
     ipc_helper_state  = HELPER_ALIVE;
 
-    PAL_HANDLE handle = thread_create(shim_ipc_helper_prepare, new);
+    PAL_HANDLE handle = DkThreadCreate(shim_ipc_helper_prepare, new);
 
     if (!handle) {
         int ret = -PAL_ERRNO(); /* put_thread() may overwrite errno */
@@ -887,7 +947,7 @@ static int create_ipc_helper(void) {
 struct shim_thread* terminate_ipc_helper(void) {
     /* First check if thread is alive. */
     lock(&ipc_helper_lock);
-    if (ipc_helper_state != HELPER_ALIVE) {
+    if (ipc_helper_state == HELPER_NOTALIVE) {
         unlock(&ipc_helper_lock);
         return NULL;
     }
@@ -907,7 +967,7 @@ struct shim_thread* terminate_ipc_helper(void) {
     DkThreadDelayExecution(500000); /* in microseconds */
 
     lock(&ipc_helper_lock);
-    if (ipc_helper_state != HELPER_ALIVE) {
+    if (ipc_helper_state == HELPER_NOTALIVE) {
         unlock(&ipc_helper_lock);
         return NULL;
     }
@@ -916,9 +976,10 @@ struct shim_thread* terminate_ipc_helper(void) {
     if (ret)
         get_thread(ret);
     ipc_helper_state = HELPER_NOTALIVE;
-    unlock(&ipc_helper_lock);
 
     /* force wake up of ipc helper thread so that it exits */
     set_event(&install_new_event, 1);
+
+    unlock(&ipc_helper_lock);
     return ret;
 }

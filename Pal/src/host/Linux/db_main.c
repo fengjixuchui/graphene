@@ -2,10 +2,8 @@
 /* Copyright (C) 2014 Stony Brook University */
 
 /*
- * db_main.c
- *
- * This file contains the main function of the PAL loader, which loads and
- * processes environment, arguments and manifest.
+ * This file contains the main function of the PAL loader, which loads and processes environment,
+ * arguments and manifest.
  */
 
 #include <asm/errno.h>
@@ -69,7 +67,7 @@ static void read_args_from_stack(void* initial_rsp, int* out_argc, const char***
     const char** e = envp;
     for (; *e; e++) {
 #ifdef DEBUG
-        if (!strcmp_static(*e, "IN_GDB=1"))
+        if (!strcmp(*e, "IN_GDB=1"))
             g_linux_state.in_gdb = true;
 #endif
     }
@@ -132,10 +130,6 @@ PAL_NUM _DkGetProcessId(void) {
     return g_linux_state.process_id;
 }
 
-PAL_NUM _DkGetHostId(void) {
-    return 0;
-}
-
 #include "dynamic_link.h"
 
 #if USE_VDSO_GETTIME == 1
@@ -149,7 +143,7 @@ static struct link_map g_pal_map;
 noreturn static void print_usage_and_exit(const char* argv_0) {
     const char* self = argv_0 ?: "<this program>";
     printf("USAGE:\n"
-           "\tFirst process: %s <path to libpal.so> init [<executable>|<manifest>] args...\n"
+           "\tFirst process: %s <path to libpal.so> init <executable> args...\n"
            "\tChildren:      %s <path to libpal.so> child <parent_pipe_fd> args...\n",
            self, self);
     printf("This is an internal interface. Use pal_loader to launch applications in Graphene.\n");
@@ -158,11 +152,14 @@ noreturn static void print_usage_and_exit(const char* argv_0) {
 
 noreturn void pal_linux_main(void* initial_rsp, void* fini_callback) {
     __UNUSED(fini_callback);  // TODO: We should call `fini_callback` at the end.
-
+    int ret;
     uint64_t start_time = _DkSystemTimeQueryEarly();
     g_pal_state.start_time = start_time;
 
-    int ret;
+    /* Initialize alloc_align as early as possible, a lot of PAL APIs depend on this being set. */
+    g_pal_state.alloc_align = _DkGetAllocationAlignment();
+    assert(IS_POWER_OF_2(g_pal_state.alloc_align));
+
     int argc;
     const char** argv;
     const char** envp;
@@ -172,8 +169,8 @@ noreturn void pal_linux_main(void* initial_rsp, void* fini_callback) {
         print_usage_and_exit(argv[0]);  // may be NULL!
 
     // Are we the first in this Graphene's namespace?
-    bool first_process = !strcmp_static(argv[2], "init");
-    if (!first_process && strcmp_static(argv[2], "child")) {
+    bool first_process = !strcmp(argv[2], "init");
+    if (!first_process && strcmp(argv[2], "child")) {
         print_usage_and_exit(argv[0]);
     }
 
@@ -224,13 +221,6 @@ noreturn void pal_linux_main(void* initial_rsp, void* fini_callback) {
         setup_vdso_map(g_sysinfo_ehdr);
 #endif
 
-    PAL_HANDLE parent = NULL, exec = NULL, manifest = NULL;
-    if (!first_process) {
-        // Children receive their argv and config via IPC.
-        int parent_pipe_fd = atoi(argv[3]);
-        init_child_process(parent_pipe_fd, &parent, &exec, &manifest);
-    }
-
     if (!g_pal_sec.process_id)
         g_pal_sec.process_id = INLINE_SYSCALL(getpid, 0);
     g_linux_state.pid = g_pal_sec.process_id;
@@ -242,55 +232,76 @@ noreturn void pal_linux_main(void* initial_rsp, void* fini_callback) {
     if (!g_linux_state.parent_process_id)
         g_linux_state.parent_process_id = g_linux_state.process_id;
 
+    PAL_HANDLE parent = NULL;
+    PAL_HANDLE exec_handle = NULL;
+    char* manifest = NULL;
     if (first_process) {
-        // We need to find a binary to run.
-        const char* exec_target = argv[3];
-        size_t size = URI_PREFIX_FILE_LEN + strlen(exec_target) + 1;
-        char* uri = malloc(size);
-        if (!uri)
+        char* exec_uri = alloc_concat(URI_PREFIX_FILE, URI_PREFIX_FILE_LEN, argv[3], -1);
+        char* manifest_path = alloc_concat(argv[3], -1, ".manifest", -1);
+        if (!exec_uri || !manifest_path)
             INIT_FAIL(PAL_ERROR_NOMEM, "Out of memory");
-        snprintf(uri, size, URI_PREFIX_FILE "%s", exec_target);
-        PAL_HANDLE file;
-        int ret = _DkStreamOpen(&file, uri, PAL_ACCESS_RDONLY, 0, 0, PAL_OPTION_CLOEXEC);
-        free(uri);
-        if (ret < 0)
+        ret = _DkStreamOpen(&exec_handle, exec_uri, PAL_ACCESS_RDONLY, 0, 0, PAL_OPTION_CLOEXEC);
+        free(exec_uri);
+        if (ret < 0) {
             INIT_FAIL(-ret, "Failed to open file to execute");
-
-        if (is_elf_object(file)) {
-            exec = file;
-        } else {
-            manifest = file;
         }
+
+        if (!is_elf_object(exec_handle)) {
+            INIT_FAIL(EINVAL, "First argument passed to Graphene must be an executable");
+        }
+
+        ret = read_text_file_to_cstr(manifest_path, &manifest);
+        if (ret == -ENOENT) {
+            ret = read_text_file_to_cstr("manifest", &manifest);
+        }
+        if (ret < 0) {
+            INIT_FAIL(-ret, "Reading manifest failed");
+        }
+    } else {
+        // Children receive their argv and config via IPC.
+        int parent_pipe_fd = atoi(argv[3]);
+        init_child_process(parent_pipe_fd, &parent, &exec_handle, &manifest);
     }
+    assert(manifest);
 
     signal_setup();
 
+    g_pal_state.raw_manifest_data = manifest;
+
+    char errbuf[256];
+    g_pal_state.manifest_root = toml_parse(manifest, errbuf, sizeof(errbuf));
+    if (!g_pal_state.manifest_root)
+        INIT_FAIL_MANIFEST(PAL_ERROR_DENIED, errbuf);
+
     /* call to main function */
-    pal_main((PAL_NUM)g_linux_state.parent_process_id, manifest, exec, NULL, parent, first_thread,
+    pal_main((PAL_NUM)g_linux_state.parent_process_id, exec_handle, NULL, parent, first_thread,
              first_process ? argv + 3 : argv + 4, envp);
 }
 
-/*
- * Returns the number of online CPUs read from /sys/devices/system/cpu/online, -errno on failure.
- * Understands complex formats like "1,3-5,6".
+/* Opens a pseudo-file describing HW resources such as online CPUs and counts the number of
+ * HW resources present in the file (if count == true) or simply reads the integer stored in the
+ * file (if count == false). For example on a single-core machine, calling this function on
+ * `/sys/devices/system/cpu/online` with count == true will return 1 and 0 with count == false.
+ * Returns PAL error code on failure.
+ * N.B: Understands complex formats like "1,3-5,6" when called with count == true.
  */
-int get_cpu_count(void) {
-    int fd = INLINE_SYSCALL(open, 3, "/sys/devices/system/cpu/online", O_RDONLY | O_CLOEXEC, 0);
-    if (fd < 0)
+int get_hw_resource(const char* filename, bool count) {
+    int fd = INLINE_SYSCALL(open, 3, filename, O_RDONLY | O_CLOEXEC, 0);
+    if (IS_ERR(fd))
         return unix_to_pal_error(ERRNO(fd));
 
     char buf[64];
     int ret = INLINE_SYSCALL(read, 3, fd, buf, sizeof(buf) - 1);
     INLINE_SYSCALL(close, 1, fd);
-    if (ret < 0) {
+    if (IS_ERR(ret))
         return unix_to_pal_error(ERRNO(ret));
-    }
 
     buf[ret] = '\0'; /* ensure null-terminated buf even in partial read */
 
     char* end;
     char* ptr = buf;
-    int cpu_count = 0;
+    int resource_cnt = 0;
+    int retval = -PAL_ERROR_STREAMNOTEXIST;
     while (*ptr) {
         while (*ptr == ' ' || *ptr == '\t' || *ptr == ',')
             ptr++;
@@ -299,22 +310,31 @@ int get_cpu_count(void) {
         if (ptr == end)
             break;
 
+        /* caller wants to read an int stored in the file */
+        if (!count) {
+            if (*end == '\n' || *end == '\0')
+                retval = firstint;
+            return retval;
+        }
+
+        /* caller wants to count the number of HW resources */
         if (*end == '\0' || *end == ',' || *end == '\n') {
-            /* single CPU index, count as one more CPU */
-            cpu_count++;
+            /* single HW resource index, count as one more */
+            resource_cnt++;
         } else if (*end == '-') {
-            /* CPU range, count how many CPUs in range */
+            /* HW resource range, count how many HW resources are in range */
             ptr = end + 1;
             int secondint = (int)strtol(ptr, &end, 10);
             if (secondint > firstint)
-                cpu_count += secondint - firstint + 1; // inclusive (e.g., 0-7, or 8-16)
+                resource_cnt += secondint - firstint + 1; // inclusive (e.g., 0-7, or 8-16)
         }
         ptr = end;
     }
 
-    if (cpu_count == 0)
-        return -PAL_ERROR_STREAMNOTEXIST;
-    return cpu_count;
+    if (count && resource_cnt > 0)
+        retval = resource_cnt;
+
+    return retval;
 }
 
 ssize_t read_file_buffer(const char* filename, char* buf, size_t buf_size) {

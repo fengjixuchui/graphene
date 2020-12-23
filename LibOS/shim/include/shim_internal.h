@@ -1,12 +1,10 @@
 /* SPDX-License-Identifier: LGPL-3.0-or-later */
 /* Copyright (C) 2014 Stony Brook University */
 
-/*
- * shim_internal.h
- */
-
 #ifndef _SHIM_INTERNAL_H_
 #define _SHIM_INTERNAL_H_
+
+#include <stdbool.h>
 
 #include "api.h"
 #include "assert.h"
@@ -18,12 +16,7 @@
 
 void* shim_init(int argc, void* args);
 
-noreturn void shim_clean_and_exit(int exit_code);
-
 /* important macros and static inline functions */
-static inline unsigned int get_cur_tid(void) {
-    return SHIM_TCB_GET(tid);
-}
 
 #define PAL_NATIVE_ERRNO() SHIM_TCB_GET(pal_errno)
 
@@ -43,7 +36,7 @@ struct debug_buf {
 #include "pal_debug.h"
 #include "pal_error.h"
 
-extern PAL_HANDLE debug_handle;
+extern bool g_debug_log_enabled;
 
 #include <stdarg.h>
 
@@ -54,68 +47,9 @@ void debug_vprintf(const char* fmt, va_list ap) __attribute__((format(printf, 1,
 
 #define debug(fmt, ...)                       \
     do {                                      \
-        if (debug_handle)                     \
+        if (g_debug_log_enabled)              \
             debug_printf(fmt, ##__VA_ARGS__); \
     } while (0)
-
-/* print system messages */
-#define SYSPRINT_BUFFER_SIZE 256
-
-void handle_printf(PAL_HANDLE hdl, const char* fmt, ...) __attribute__((format(printf, 2, 3)));
-void handle_vprintf(PAL_HANDLE hdl, const char* fmt, va_list ap)
-    __attribute__((format(printf, 2, 0)));
-
-#define __SYS_PRINTF(fmt, ...)                       \
-    do {                                             \
-        PAL_HANDLE _hdl = __open_shim_stdio();       \
-        if (_hdl)                                    \
-            handle_printf(_hdl, fmt, ##__VA_ARGS__); \
-    } while (0)
-
-#define __SYS_VPRINTF(fmt, va)                 \
-    do {                                       \
-        PAL_HANDLE _hdl = __open_shim_stdio(); \
-        if (_hdl)                              \
-            handle_vprintf(_hdl, fmt, va);     \
-    } while (0)
-
-#define __SYS_FPRINTF(hdl, fmt, ...)            \
-    do {                                        \
-        handle_printf(hdl, fmt, ##__VA_ARGS__); \
-    } while (0)
-
-#define SYS_PRINTF(fmt, ...)              \
-    do {                                  \
-        MASTER_LOCK();                    \
-        __SYS_PRINTF(fmt, ##__VA_ARGS__); \
-        MASTER_UNLOCK();                  \
-    } while (0)
-
-#define SYS_FPRINTF(hdl, fmt, ...)              \
-    do {                                        \
-        MASTER_LOCK();                          \
-        __SYS_FPRINTF(hdl, fmt, ##__VA_ARGS__); \
-        MASTER_UNLOCK();                        \
-    } while (0)
-
-extern PAL_HANDLE shim_stdio;
-
-static inline PAL_HANDLE __open_shim_stdio(void) {
-    if (shim_stdio == (PAL_HANDLE)-1)
-        return NULL;
-
-    if (shim_stdio)
-        return shim_stdio;
-
-    shim_stdio = DkStreamOpen(URI_PREFIX_DEV "tty", PAL_ACCESS_RDWR, 0, 0, 0);
-
-    if (!shim_stdio) {
-        shim_stdio = (PAL_HANDLE)-1;
-        return NULL;
-    }
-
-    return shim_stdio;
-}
 
 #if 0
 #define DEBUG_BREAK_ON_FAILURE() DEBUG_BREAK()
@@ -123,11 +57,12 @@ static inline PAL_HANDLE __open_shim_stdio(void) {
 #define DEBUG_BREAK_ON_FAILURE() do {} while (0)
 #endif
 
-#define BUG()                                              \
-    do {                                                   \
-        __SYS_PRINTF("BUG() " __FILE__ ":%d\n", __LINE__); \
-        DEBUG_BREAK_ON_FAILURE();                          \
-        shim_clean_and_exit(-ENOTRECOVERABLE);             \
+#define BUG()                                       \
+    do {                                            \
+        warn("BUG() " __FILE__ ":%d\n", __LINE__);  \
+        DEBUG_BREAK_ON_FAILURE();                   \
+        /* Crash the process. */                    \
+        CRASH_PROCESS();                            \
     } while (0)
 
 #define DEBUG_HERE()                                         \
@@ -186,11 +121,11 @@ static inline int64_t get_cur_preempt(void) {
     r func(PROTO_ARGS_##n(args));
 
 #define PARSE_SYSCALL1(name, ...) \
-    if (debug_handle)             \
+    if (g_debug_log_enabled)      \
         parse_syscall_before(__NR_##name, #name, ##__VA_ARGS__);
 
 #define PARSE_SYSCALL2(name, ...) \
-    if (debug_handle)             \
+    if (g_debug_log_enabled)      \
         parse_syscall_after(__NR_##name, #name, ##__VA_ARGS__);
 
 void parse_syscall_before(int sysno, const char* name, int nr, ...);
@@ -327,18 +262,6 @@ void parse_syscall_after(int sysno, const char* name, int nr, ...);
 
 #define PAL_CB(member) (pal_control.member)
 
-extern bool lock_enabled;
-
-static inline void enable_locking(void) {
-    if (!lock_enabled)
-        lock_enabled = true;
-}
-
-static inline PAL_HANDLE thread_create(void* func, void* arg) {
-    assert(lock_enabled);
-    return DkThreadCreate(func, arg);
-}
-
 static inline int64_t __disable_preempt(shim_tcb_t* tcb) {
     // tcb->context.syscall_nr += SYSCALL_NR_PREEMPT_INC;
     int64_t preempt = __atomic_add_fetch(&tcb->context.preempt.counter, 1, __ATOMIC_SEQ_CST);
@@ -379,133 +302,19 @@ static inline void enable_preempt(shim_tcb_t* tcb) {
     __enable_preempt(tcb);
 }
 
-static inline bool lock_created(struct shim_lock* l) {
-    return l->lock != NULL;
-}
-
-static inline void clear_lock(struct shim_lock* l) {
-    l->lock  = NULL;
-    l->owner = 0;
-}
-
-static inline bool create_lock(struct shim_lock* l) {
-    l->owner = 0;
-    l->lock  = DkMutexCreate(0);
-    return l->lock != NULL;
-}
-
-static inline void destroy_lock(struct shim_lock* l) {
-    DkObjectClose(l->lock);
-    l->lock  = NULL;
-    l->owner = 0;
-}
-
-#ifdef DEBUG
-#define lock(l) __lock(l, __FILE__, __LINE__)
-static void __lock(struct shim_lock* l, const char* file, int line) {
-#else
-static void lock(struct shim_lock* l) {
-#endif
-    if (!lock_enabled) {
-        return;
+/*
+ * These events have counting semaphore semantics:
+ * - `set_event(e, n)` increases value of the semaphore by `n`,
+ * - `wait_event(e)` decreases value by 1 (blocking if it's 0),
+ * - `clear_event(e)` decreases value to 0, without blocking - this operation is not atomic.
+ * Note that using `clear_event` probably requires external locking to avoid races.
+ */
+static inline int create_event(AEVENTTYPE* e) {
+    e->event = DkStreamOpen(URI_PREFIX_PIPE, PAL_ACCESS_RDWR, 0, 0, 0);
+    if (!e->event) {
+        return -PAL_ERRNO();
     }
-    /* TODO: This whole if should be just an assert. Change it once we are sure that it does not
-     * trigger (previous code allowed for this case). Same in unlock below. */
-    if (!l->lock) {
-#ifdef DEBUG
-        debug("Trying to lock an uninitialized lock at %s:%d!\n", file, line);
-#endif // DEBUG
-        __abort();
-    }
-
-    shim_tcb_t* tcb = shim_get_tcb();
-    disable_preempt(tcb);
-
-    while (!DkSynchronizationObjectWait(l->lock, NO_TIMEOUT))
-        /* nop */;
-
-    l->owner = tcb->tid;
-}
-
-#ifdef DEBUG
-#define unlock(l) __unlock(l, __FILE__, __LINE__)
-static inline void __unlock(struct shim_lock* l, const char* file, int line) {
-#else
-static inline void unlock(struct shim_lock* l) {
-#endif
-    if (!lock_enabled) {
-        return;
-    }
-    if (!l->lock) {
-#ifdef DEBUG
-        debug("Trying to unlock an uninitialized lock at %s:%d!\n", file, line);
-#endif // DEBUG
-        __abort();
-    }
-
-    shim_tcb_t* tcb = shim_get_tcb();
-
-    l->owner = 0;
-    DkMutexRelease(l->lock);
-    enable_preempt(tcb);
-}
-
-static inline bool locked(struct shim_lock* l) {
-    if (!lock_enabled) {
-        return true;
-    }
-    if (!l->lock) {
-        return false;
-    }
-    return get_cur_tid() == l->owner;
-}
-
-#define DEBUG_MASTER_LOCK 0
-
-extern struct shim_lock __master_lock;
-
-#if DEBUG_MASTER_LOCK == 1
-#define MASTER_LOCK()                                          \
-    do {                                                       \
-        lock(&__master_lock);                                  \
-        pal_printf("master lock " __FILE__ ":%d\n", __LINE__); \
-    } while (0)
-#define MASTER_UNLOCK()                                          \
-    do {                                                         \
-        pal_printf("master unlock " __FILE__ ":%d\n", __LINE__); \
-        unlock(&__master_lock);                                  \
-    } while (0)
-#else
-#define MASTER_LOCK()         \
-    do {                      \
-        lock(&__master_lock); \
-    } while (0)
-#define MASTER_UNLOCK()         \
-    do {                        \
-        unlock(&__master_lock); \
-    } while (0)
-#endif
-
-static inline bool create_lock_runtime(struct shim_lock* l) {
-    bool ret = true;
-
-    if (!lock_created(l)) {
-        MASTER_LOCK();
-        if (!lock_created(l))
-            ret = create_lock(l);
-        MASTER_UNLOCK();
-    }
-
-    return ret;
-}
-
-static inline void create_event(AEVENTTYPE* e) {
-    if (!e->event)
-        e->event = DkStreamOpen(URI_PREFIX_PIPE, PAL_ACCESS_RDWR, 0, 0, PAL_OPTION_NONBLOCK);
-}
-
-static inline bool event_created(AEVENTTYPE* e) {
-    return e->event != NULL;
+    return 0;
 }
 
 static inline PAL_HANDLE event_handle(AEVENTTYPE* e) {
@@ -519,31 +328,90 @@ static inline void destroy_event(AEVENTTYPE* e) {
     }
 }
 
-static inline void set_event(AEVENTTYPE* e, int n) {
-    if (e->event) {
-        char bytes[n];
-        DkStreamWrite(e->event, 0, n, bytes, NULL);
+static inline int set_event(AEVENTTYPE* e, size_t n) {
+    /* TODO: this should be changed into an assert, once we make sure it does not happen (old
+     * version handled it). */
+    if (!e->event) {
+        return -EINVAL;
     }
+
+    char bytes[n];
+    memset(bytes, '\0', n);
+    while (n > 0) {
+        PAL_NUM ret = DkStreamWrite(e->event, 0, n, bytes, NULL);
+        if (ret == PAL_STREAM_ERROR) {
+            int err = PAL_ERRNO();
+            if (err == EINTR || err == EAGAIN || err == EWOULDBLOCK) {
+                continue;
+            }
+            return -err;
+        }
+        n -= ret;
+    }
+
+    return 0;
 }
 
-static inline void wait_event(AEVENTTYPE* e) {
-    if (e->event) {
+static inline int wait_event(AEVENTTYPE* e) {
+    /* TODO: this should be changed into an assert, once we make sure it does not happen (old
+     * version handled it). */
+    if (!e->event) {
+        return -EINVAL;
+    }
+
+    int err = 0;
+    do {
         char byte;
-        int n = 0;
-        do {
-            n = DkStreamRead(e->event, 0, 1, &byte, NULL, 0);
-        } while (!n);
-    }
+        PAL_NUM ret = DkStreamRead(e->event, 0, 1, &byte, NULL, 0);
+        err = ret == PAL_STREAM_ERROR ? PAL_ERRNO() : 0;
+    } while (err == EINTR || err == EAGAIN || err == EWOULDBLOCK);
+
+    return -err;
 }
 
-static inline void clear_event(AEVENTTYPE* e) {
-    if (e->event) {
-        char bytes[100];
-        int n;
-        do {
-            n = DkStreamRead(e->event, 0, 100, bytes, NULL, 0);
-        } while (n == 100);
+static inline int clear_event(AEVENTTYPE* e) {
+    /* TODO: this should be changed into an assert, once we make sure it does not happen (old
+     * version handled it). */
+    if (!e->event) {
+        return -EINVAL;
     }
+
+    while (1) {
+        PAL_HANDLE handle = e->event;
+        PAL_FLG ievent = PAL_WAIT_READ;
+        PAL_FLG revent = 0;
+
+        shim_get_tcb()->pal_errno = PAL_ERROR_SUCCESS;
+        PAL_BOL ret = DkStreamsWaitEvents(1, &handle, &ievent, &revent, /*timeout=*/0);
+        if (!ret) {
+            int err = PAL_ERRNO();
+            if (err == EINTR) {
+                continue;
+            } else if (!err || err == EAGAIN || err == EWOULDBLOCK) {
+                break;
+            }
+            return -err;
+        }
+
+        /* Even if `revent` has `PAL_WAIT_ERROR` marked, let `DkSitreamRead()` report the error
+         * below. */
+        assert(revent);
+
+        char bytes[100];
+        PAL_NUM n = DkStreamRead(e->event, 0, sizeof(bytes), bytes, NULL, 0);
+        if (n == PAL_STREAM_ERROR) {
+            int err = PAL_ERRNO();
+            if (err == EINTR) {
+                continue;
+            } else if (err == EAGAIN || err == EWOULDBLOCK) {
+                /* This should not happen, since we polled above  ... */
+                break;
+            }
+            return -err;
+        }
+    }
+
+    return 0;
 }
 
 /* reference counter APIs */
@@ -609,8 +477,6 @@ extern void* __load_address_end;
 extern void* __code_address;
 extern void* __code_address_end;
 
-unsigned long parse_int(const char* str);
-
 extern const char** migrated_argv;
 extern const char** migrated_envp;
 
@@ -620,7 +486,6 @@ int init_brk_region(void* brk_region, size_t data_segment_size);
 void reset_brk(void);
 int init_internal_map(void);
 int init_loader(void);
-int init_manifest(PAL_HANDLE manifest_handle);
 int init_rlimit(void);
 
 bool test_user_memory(void* addr, size_t size, bool write);
@@ -631,8 +496,10 @@ void set_rlimit_cur(int resource, uint64_t rlim);
 
 int object_wait_with_retry(PAL_HANDLE handle);
 
-void release_clear_child_tid(int* clear_child_tid);
-
+void _update_epolls(struct shim_handle* handle);
 void delete_from_epoll_handles(struct shim_handle* handle);
+
+void* allocate_stack(size_t size, size_t protect_size, bool user);
+int init_stack(const char** argv, const char** envp, const char*** out_argp, elf_auxv_t** out_auxv);
 
 #endif /* _SHIM_INTERNAL_H_ */

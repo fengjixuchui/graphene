@@ -180,19 +180,14 @@ Navigate to the PyTorch example directory we examined in the previous section::
 
    cd <graphene repository>/Examples/pytorch
 
-Let's take a look at the template manifest file ``pytorch.manifest.template``.
-For illustrative purposes, we will look at only a few entries of the file. Note
-that we can simply ignore SGX-specific keys (starting with the ``sgx.`` prefix)
-for our non-SGX run.
+Let's take a look at the template manifest file ``python3.manifest.template``
+(recall that PyTorch is a collection of libraries and utilities but it uses
+Python as the actual executable). For illustrative purposes, we will look at
+only a few entries of the file. Note that we can simply ignore SGX-specific keys
+(starting with the ``sgx.`` prefix) for our non-SGX run.
 
-The executable for the PyTorch workload is ``python3`` (recall that PyTorch is a
-collection of libraries and utilities but it uses Python as an actual
-executable), which is located at the host path ``/usr/bin/python3``::
-
-   loader.exec = file:/usr/bin/python3
-
-Notice that the manifest file is not fully secure because it propagates
-untrusted command-line arguments and environment variables into the enclave. We
+Notice that the manifest file is not secure because it propagates untrusted
+command-line arguments and environment variables into the enclave. We
 keep these work-arounds in this tutorial for simplicity, but this configuration
 must not be used in production::
 
@@ -203,9 +198,9 @@ We mount the entire ``<graphene repository>/Runtime/`` host-level directory to
 the ``/lib`` directory seen inside Graphene. This trick allows to transparently
 replace standard C libraries with Graphene-patched libraries::
 
-   fs.mount.lib.type = chroot
-   fs.mount.lib.path = /lib
-   fs.mount.lib.uri = file:$(GRAPHENEDIR)/Runtime/
+   fs.mount.lib.type = "chroot"
+   fs.mount.lib.path = "/lib"
+   fs.mount.lib.uri  = "file:$(GRAPHENEDIR)/Runtime/"
 
 We also mount other directories such as ``/usr``,  ``/etc``, and ``/tmp``
 required by Python and PyTorch (they search for libraries and utility files in
@@ -213,9 +208,9 @@ these system directories).
 
 Finally, we mount the path containing the Python packages installed via pip::
 
-   fs.mount.pip.type = chroot
-   fs.mount.pip.path = $(HOME)/.local/lib
-   fs.mount.pip.uri = file:$(HOME)/.local/lib
+   fs.mount.pip.type = "chroot"
+   fs.mount.pip.path = "$(HOME)/.local/lib"
+   fs.mount.pip.uri  = "file:$(HOME)/.local/lib"
 
 Now we can run ``make`` to build/copy all required Graphene files::
 
@@ -223,18 +218,22 @@ Now we can run ``make`` to build/copy all required Graphene files::
 
 This command will autogenerate a couple new files:
 
-#. Generate the actual non-SGX Graphene manifest (``pytorch.manifest``) from the
+#. Generate the actual non-SGX Graphene manifest (``python3.manifest``) from the
    template manifest file. This file will be used by Graphene to decide on
    different manifest options how to execute PyTorch inside Graphene.
 
 #. Create a symbolic link to the generic Graphene loader (``pal_loader``). This
    is just for convenience.
 
-Now, launch Graphene with the generated manifest via ``pal_loader``. You can
-simply append the arguments after the manifest name.  Our example takes
+#. Because Graphene requires 1-1 manifest-executable correspondence, it will
+   also create a symlink to the Python binary, with the name corresponding to
+   the manifest.
+
+Now, launch Graphene via ``pal_loader``. You can simply append the arguments
+after the executable name.  Our example takes
 ``pytorchexample.py`` as an argument::
 
-   ./pal_loader pytorch.manifest pytorchexample.py
+   ./pal_loader ./python3 pytorchexample.py
 
 That's it. You have run the PyTorch example with Graphene. You can check
 ``result.txt`` to make sure it ran correctly.
@@ -248,13 +247,13 @@ example inside an Intel SGX enclave.  Let's go back to the manifest template
 these entries are ignored if Graphene runs in non-SGX mode).
 
 Below, we will highlight some of the SGX-specific manifest options in
-``pytorch.manifest.template``.  SGX syntax is fully described `here
+``python3.manifest.template``.  SGX syntax is fully described `here
 <https://graphene.readthedocs.io/en/latest/manifest-syntax.html?highlight=manifest#sgx-syntax>`__.
 
 First, here are the following SGX-specific lines in the manifest template::
 
-   sgx.trusted_files.ld = file:$(GRAPHENEDIR)/Runtime/ld-linux-x86-64.so.2
-   sgx.trusted_files.libc = file:$(GRAPHENEDIR)/Runtime/libc.so.6
+   sgx.trusted_files.ld   = "file:$(GRAPHENEDIR)/Runtime/ld-linux-x86-64.so.2"
+   sgx.trusted_files.libc = "file:$(GRAPHENEDIR)/Runtime/libc.so.6"
    ...
 
 ``sgx.trusted_files.<name>`` specifies a file that will be verified and trusted
@@ -273,7 +272,7 @@ against the expected value in the manifest.
 The PyTorch manifest template also contains ``sgx.allowed_files.<name>``
 entries. They specify files unconditionally allowed by the enclave::
 
-   sgx.allowed_files.pythonhome = file:$(HOME)/.local/lib
+   sgx.allowed_files.pythonhome = "file:$(HOME)/.local/lib"
 
 This line unconditionally allows all Python libraries in the path to be loaded
 into the enclave.  Ideally, the developer needs to replace it with
@@ -286,13 +285,6 @@ these allowed files only for simplicity. A next tutorial on PyTorch (with Docker
 integration) replaces all allowed files with trusted/protected files (that
 tutorial is work in progress).
 
-There is also the following line in the manifest template::
-
-   sgx.allow_file_creation = 1
-
-This allows the enclave to generate new files. We need this since the PyTorch
-Python script writes the result to ``result.txt``.
-
 Now we desribed how the manifest template looks like and what the SGX-specific
 manifest entries represent. Let's prepare all the files needed to run PyTorch in
 an SGX enclave::
@@ -301,12 +293,12 @@ an SGX enclave::
 
 The above command performs the following tasks:
 
-#. Generates the final SGX manifest file ``pytorch.manifest.sgx``.
+#. Generates the final SGX manifest file ``python3.manifest.sgx``.
 
 #. Signs the manifest and generates the SGX signature file containing SIGSTRUCT
-   (``pytorch.sig``).
+   (``python3.sig``).
 
-#. Creates a dummy EINITTOKEN token file ``pytorch.token`` (this file is used
+#. Creates a dummy EINITTOKEN token file ``python3.token`` (this file is used
    for backwards compatibility with SGX platforms with EPID and without Flexible
    Launch Control).
 
@@ -314,7 +306,7 @@ After running this command and building all the required files, we can simply
 set ``SGX=1`` environment variable and use ``pal_loader`` to launch the PyTorch
 workload inside an SGX enclave::
 
-   SGX=1 ./pal_loader pytorch.manifest.sgx pytorchexample.py
+   SGX=1 ./pal_loader ./python3 pytorchexample.py
 
 It will run exactly the same Python script but inside the SGX enclave. Again,
 you can verify that PyTorch ran correctly by examining ``result.txt``.
@@ -476,31 +468,31 @@ launch the server in the background.
 Preparing Manifest File
 ^^^^^^^^^^^^^^^^^^^^^^^
 
-Finally, let's modify the manifest file.  Open ``pytorch.manifest.template``
+Finally, let's modify the manifest file.  Open ``python3.manifest.template``
 with your favorite text editor.
 
 Replace ``trusted_files`` with ``protected_files`` for the input files::
 
-   # sgx.trusted_files.classes = file:classes.txt
-   sgx.protected_files.classes = file:classes.txt
+   # sgx.trusted_files.classes = "file:classes.txt"
+   sgx.protected_files.classes = "file:classes.txt"
 
-   # sgx.trusted_files.image = file:input.jpg
-   sgx.protected_files.image = file:input.jpg
+   # sgx.trusted_files.image = "file:input.jpg"
+   sgx.protected_files.image = "file:input.jpg"
 
-   # sgx.trusted_files.model = file:alexnet-pretrained.pt
-   sgx.protected_files.model = file:alexnet-pretrained.pt
+   # sgx.trusted_files.model = "file:alexnet-pretrained.pt"
+   sgx.protected_files.model = "file:alexnet-pretrained.pt"
 
 Also add ``result.txt`` as a protected file so that PyTorch writes the
 *encrypted* result into it::
 
-   sgx.protected_files.result = file:result.txt
+   sgx.protected_files.result = "file:result.txt"
 
 Now, let's add the secret provisioning library to the manifest. Append the
 current directory ``./`` to ``LD_LIBRARY_PATH`` so that PyTorch and Graphene
 add-ons search for libraries in the current directory::
 
    # this instructs in-Graphene dynamic loader to search for dependencies in the current directory
-   loader.env.LD_LIBRARY_PATH = /lib:/usr/lib:$(ARCH_LIBDIR):/usr/$(ARCH_LIBDIR):./
+   loader.env.LD_LIBRARY_PATH = "/lib:/usr/lib:$(ARCH_LIBDIR):/usr/$(ARCH_LIBDIR):./"
 
 Add the following lines to enable remote secret provisioning and allow protected
 files to be transparently decrypted by the provisioned key. Recall that we
@@ -511,14 +503,14 @@ the used environment variables and other manifest options, see `here
 
    sgx.remote_attestation = 1
 
-   loader.env.LD_PRELOAD = libsecret_prov_attest.so
-   loader.env.SECRET_PROVISION_CONSTRUCTOR = 1
-   loader.env.SECRET_PROVISION_SET_PF_KEY = 1
+   loader.env.LD_PRELOAD = "libsecret_prov_attest.so"
+   loader.env.SECRET_PROVISION_CONSTRUCTOR = "1"
+   loader.env.SECRET_PROVISION_SET_PF_KEY = "1"
    loader.env.SECRET_PROVISION_CA_CHAIN_PATH = "certs/test-ca-sha256.crt"
    loader.env.SECRET_PROVISION_SERVERS = "localhost:4433"
 
-   sgx.trusted_files.libsecretprovattest = file:libsecret_prov_attest.so
-   sgx.trusted_files.cachain = file:certs/test-ca-sha256.crt
+   sgx.trusted_files.libsecretprovattest = "file:libsecret_prov_attest.so"
+   sgx.trusted_files.cachain = "file:certs/test-ca-sha256.crt"
 
 The ``libsecret_prov_attest.so`` library provides the in-enclave logic to attest
 the SGX enclave, Graphene instance, and the application running in it to the
@@ -546,7 +538,7 @@ We are ready to run the end-to-end PyTorch example. Notice that we didn't change
 a line of code in the Python script. Moreover, we can run it with exactly the
 same command used in the previous section::
 
-   SGX=1 ./pal_loader pytorch.manifest pytorchexample.py
+   SGX=1 ./pal_loader ./python3 pytorchexample.py
 
 This should run PyTorch with encrypted input files and generate the encrypted
 ``result.txt`` output file. Note that we already launched the secret

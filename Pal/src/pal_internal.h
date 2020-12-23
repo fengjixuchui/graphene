@@ -2,10 +2,7 @@
 /* Copyright (C) 2014 Stony Brook University */
 
 /*
- * pal_internal.h
- *
- * This file contains definition of functions, variables and data structures
- * for internal uses.
+ * This file contains definitions of functions, variables and data structures for internal uses.
  */
 
 #ifndef PAL_INTERNAL_H
@@ -16,6 +13,7 @@
 #include "pal.h"
 #include "pal_defs.h"
 #include "pal_error.h"
+#include "toml.h"
 
 #ifndef IN_PAL
 #error "pal_internal.h can only be included in PAL"
@@ -151,13 +149,10 @@ extern struct pal_internal_state {
 
     PAL_HANDLE      parent_process;
 
-    const char*     manifest;
-    PAL_HANDLE      manifest_handle;
+    const char*     raw_manifest_data;
+    toml_table_t*   manifest_root;
 
-    const char*     exec;
     PAL_HANDLE      exec_handle;
-
-    struct config_store* root_config;
 
     /* May not be the same as page size, see e.g. SYSTEM_INFO::dwAllocationGranularity on Windows.
      */
@@ -177,13 +172,14 @@ extern PAL_CONTROL g_pal_control;
 #define ALLOC_ALIGN_DOWN(addr)     ALIGN_DOWN_POW2(addr, g_pal_state.alloc_align)
 #define ALLOC_ALIGN_DOWN_PTR(addr) ALIGN_DOWN_PTR_POW2(addr, g_pal_state.alloc_align)
 
+#define CPUID_EXT_TOPOLOGY_ENUMERATION_LEAF   0x0b
+#define CPUID_V2EXT_TOPOLOGY_ENUMERATION_LEAF 0x1f
 /*!
  * \brief Main initialization function
  *
  * This function must be called by the host-specific loader.
  *
  * \param instance_id       current instance id
- * \param manifest_handle   manifest handle if opened
  * \param exec_handle       executable handle if opened
  * \param exec_loaded_addr  executable addr if loaded
  * \param parent_process    parent process if it's a child
@@ -191,16 +187,18 @@ extern PAL_CONTROL g_pal_control;
  * \param arguments         application arguments
  * \param environments      environment variables
  */
-noreturn void pal_main(PAL_NUM instance_id, PAL_HANDLE manifest_handle, PAL_HANDLE exec_handle,
-                       PAL_PTR exec_loaded_addr, PAL_HANDLE parent_process, PAL_HANDLE first_thread,
-                       PAL_STR* arguments, PAL_STR* environments);
+noreturn void pal_main(PAL_NUM instance_id, PAL_HANDLE exec_handle, PAL_PTR exec_loaded_addr,
+                       PAL_HANDLE parent_process, PAL_HANDLE first_thread, PAL_STR* arguments,
+                       PAL_STR* environments);
 
 /* For initialization */
+
+/* Called very early, its implementation should have no dependencies. */
 unsigned long _DkGetAllocationAlignment(void);
+
 void _DkGetAvailableUserAddressRange(PAL_PTR* start, PAL_PTR* end);
 bool _DkCheckMemoryMappable(const void* addr, size_t size);
 PAL_NUM _DkGetProcessId(void);
-PAL_NUM _DkGetHostId(void);
 unsigned long _DkMemoryQuota(void);
 unsigned long _DkMemoryAvailableQuota(void);
 // Returns 0 on success, negative PAL code on failure
@@ -234,6 +232,8 @@ void _DkThreadYieldExecution(void);
 int _DkThreadResume(PAL_HANDLE threadHandle);
 int _DkProcessCreate(PAL_HANDLE* handle, const char* uri, const char** args);
 noreturn void _DkProcessExit(int exitCode);
+int _DkThreadSetCpuAffinity(PAL_HANDLE thread, PAL_NUM cpumask_size, PAL_PTR cpu_mask);
+int _DkThreadGetCpuAffinity(PAL_HANDLE thread, PAL_NUM cpumask_size, PAL_PTR cpu_mask);
 
 /* DkMutex calls */
 int _DkMutexCreate(PAL_HANDLE* handle, int initialCount);
@@ -277,8 +277,8 @@ int _DkSystemTimeQuery(uint64_t* out_usec);
  * 0 on success, negative on failure.
  */
 size_t _DkRandomBitsRead(void* buffer, size_t size);
-int _DkSegmentRegisterSet(int reg, const void* addr);
 int _DkSegmentRegisterGet(int reg, void** addr);
+int _DkSegmentRegisterSet(int reg, void* addr);
 int _DkInstructionCacheFlush(const void* addr, int size);
 int _DkCpuIdRetrieve(unsigned int leaf, unsigned int subleaf, unsigned int values[4]);
 int _DkAttestationReport(PAL_PTR user_report_data, PAL_NUM* user_report_data_size,
@@ -295,6 +295,14 @@ int _DkSetProtectedFilesKey(PAL_PTR pf_key_hex);
         _DkProcessExit(exitcode);                                                             \
     } while (0)
 
+#define INIT_FAIL_MANIFEST(exitcode, reason)                                                  \
+    do {                                                                                      \
+        printf("PAL failed at parsing the manifest: %s\n"                                     \
+               "  Graphene switched to the TOML format recently, please update the manifest\n"\
+               "  (in particular, string values must be put in double quotes)\n", reason);    \
+        _DkProcessExit(exitcode);                                                             \
+    } while (0)
+
 /* Loading ELF binaries */
 enum object_type { OBJECT_RTLD, OBJECT_EXEC, OBJECT_PRELOAD, OBJECT_EXTERNAL };
 
@@ -308,7 +316,6 @@ void init_slab_mgr(int alignment);
 void* malloc(size_t size);
 void* malloc_copy(const void* mem, size_t size);
 void* calloc(size_t nmem, size_t size);
-char* strdup(const char* source);
 void free(void* mem);
 
 #ifdef __GNUC__
@@ -328,13 +335,15 @@ void free(void* mem);
 #define EXTERN_ALIAS(name)
 #endif
 
+int _DkInitDebugStream(const char* path);
+ssize_t _DkDebugLog(const void* buf, size_t size);
 void _DkPrintConsole(const void* buf, int size);
 int printf(const char* fmt, ...) __attribute__((format(printf, 1, 2)));
 int vprintf(const char* fmt, va_list ap) __attribute__((format(printf, 1, 0)));
 
-/* errval is negative value, see pal_strerror */
-static inline void print_error(const char* errstring, int errval) {
-    printf("%s (%s)\n", errstring, pal_strerror(errval));
+/* err - positive value of error code */
+static inline void print_error(const char* msg, int err) {
+    printf("%s (%s)\n", msg, pal_strerror(err));
 }
 
 #endif

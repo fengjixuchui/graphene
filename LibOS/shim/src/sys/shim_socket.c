@@ -2,11 +2,8 @@
 /* Copyright (C) 2014 Stony Brook University */
 
 /*
- * shim_socket.c
- *
- * Implementation of system call "socket", "bind", "accept4", "listen",
- * "connect", "sendto", "recvfrom", "sendmsg", "recvmsg" and "shutdown" and
- * "getsockname", "getpeername".
+ * Implementation of system calls "socket", "bind", "accept4", "listen", "connect", "sendto",
+ * "recvfrom", "sendmsg", "recvmsg" and "shutdown" and "getsockname", "getpeername".
  */
 
 #include <asm/socket.h>
@@ -23,6 +20,9 @@
 #include "shim_fs.h"
 #include "shim_handle.h"
 #include "shim_internal.h"
+#include "shim_lock.h"
+#include "shim_process.h"
+#include "shim_signal.h"
 #include "shim_table.h"
 #include "shim_utils.h"
 
@@ -46,8 +46,6 @@
 
 #define AF_UNSPEC 0
 
-static int rebase_on_lo __attribute_migratable = -1;
-
 static size_t minimal_addrlen(int domain) {
     switch (domain) {
         case AF_INET:
@@ -57,30 +55,6 @@ static size_t minimal_addrlen(int domain) {
         default:
             return sizeof(struct sockaddr);
     }
-}
-
-static int init_port_rebase(void) {
-    if (rebase_on_lo != -1)
-        return 0;
-
-    char cfg[CONFIG_MAX];
-    int rebase = 0;
-
-    if (!root_config || get_config(root_config, "net.port.rebase_on_lo", cfg, sizeof(cfg)) <= 0) {
-        rebase_on_lo = 0;
-        return 0;
-    }
-
-    for (const char* p = cfg; *p; p++) {
-        if (*p < '0' || *p > '9' || rebase > 32767) {
-            rebase_on_lo = 0;
-            return 0;
-        }
-        rebase = rebase * 10 + (*p - '0');
-    }
-
-    rebase_on_lo = rebase;
-    return 0;
 }
 
 static int inet_parse_addr(int domain, int type, const char* uri, struct addr_inet* bind,
@@ -161,26 +135,12 @@ static int unix_create_uri(char* uri, int count, enum shim_sock_state state, cha
 }
 
 static void inet_rebase_port(bool reverse, int domain, struct addr_inet* addr, bool local) {
-    init_port_rebase();
-
-    if (rebase_on_lo) {
-        if (domain == AF_INET) {
-            unsigned char* ad = (unsigned char*)&addr->addr.v4.s_addr;
-            if (!local && memcmp(ad, "\177\0\0\1", 4))
-                return;
-        }
-
-        if (domain == AF_INET6) {
-            unsigned short* ad = (void*)&addr->addr.v6.s6_addr;
-            if (!local && memcmp(ad, "\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\1", 16))
-                return;
-        }
-    }
-
+    __UNUSED(domain);
+    __UNUSED(local);
     if (reverse)
-        addr->port = addr->ext_port - rebase_on_lo;
+        addr->port = addr->ext_port;
     else
-        addr->ext_port = addr->port + rebase_on_lo;
+        addr->ext_port = addr->port;
 }
 
 static ssize_t inet_translate_addr(int domain, char* uri, size_t count, struct addr_inet* addr) {
@@ -478,9 +438,9 @@ int shim_do_bind(int sockfd, struct sockaddr* addr, int _addrlen) {
         struct shim_dentry* dent  = NULL;
 
         if ((ret = path_lookupat(NULL, spath, LOOKUP_CREATE, &dent, NULL)) < 0) {
-            // DEP 7/3/17: We actually want either 0 or -ENOENT, as the
-            // expected case is that the name is free (and we get the dent to
-            // populate the name)
+            /* We want either 0 or -ENOENT (dent is a valid object in both cases), as the expected
+             * case is that the name is free (and we use dent with the name already populated).
+             * FIXME: This is terrible semantics; path_lookupat() must be re-worked. */
             if (ret != -ENOENT || !dent)
                 goto out;
         }
@@ -551,6 +511,7 @@ int shim_do_bind(int sockfd, struct sockaddr* addr, int _addrlen) {
 
     hdl->pal_handle = pal_hdl;
     __process_pending_options(hdl);
+    _update_epolls(hdl);
     ret = 0;
 
 out:
@@ -582,13 +543,13 @@ static int inet_parse_addr(int domain, int type, const char* uri, struct addr_in
 
     enum { UDP, UDPSRV, TCP, TCPSRV } prefix;
 
-    if (strstartswith_static(uri, URI_PREFIX_UDP))
+    if (strstartswith(uri, URI_PREFIX_UDP))
         prefix = UDP;
-    else if (strstartswith_static(uri, URI_PREFIX_UDP_SRV))
+    else if (strstartswith(uri, URI_PREFIX_UDP_SRV))
         prefix = UDPSRV;
-    else if (strstartswith_static(uri, URI_PREFIX_TCP))
+    else if (strstartswith(uri, URI_PREFIX_TCP))
         prefix = TCP;
-    else if (strstartswith_static(uri, URI_PREFIX_TCP_SRV))
+    else if (strstartswith(uri, URI_PREFIX_TCP_SRV))
         prefix = TCPSRV;
     else
         return -EINVAL;
@@ -713,6 +674,7 @@ int shim_do_connect(int sockfd, struct sockaddr* addr, int _addrlen) {
     lock(&hdl->lock);
     enum shim_sock_state state = sock->sock_state;
     int ret = -EINVAL;
+    bool pal_handle_updated = false;
 
     if (state == SOCK_CONNECTED) {
         if (addr->sa_family == AF_UNSPEC) {
@@ -721,6 +683,7 @@ int shim_do_connect(int sockfd, struct sockaddr* addr, int _addrlen) {
                 DkStreamDelete(hdl->pal_handle, 0);
                 DkObjectClose(hdl->pal_handle);
                 hdl->pal_handle = NULL;
+                pal_handle_updated = true;
             }
             debug("shim_connect: reconnect on a stream socket\n");
             ret = 0;
@@ -743,7 +706,7 @@ int shim_do_connect(int sockfd, struct sockaddr* addr, int _addrlen) {
 
         struct sockaddr_un* saddr = (struct sockaddr_un*)addr;
         char* spath               = saddr->sun_path;
-        struct shim_dentry* dent;
+        struct shim_dentry* dent  = NULL;
 
         if ((ret = path_lookupat(NULL, spath, LOOKUP_CREATE, &dent, NULL)) < 0) {
             // DEP 7/3/17: We actually want either 0 or -ENOENT, as the
@@ -778,6 +741,7 @@ int shim_do_connect(int sockfd, struct sockaddr* addr, int _addrlen) {
         DkStreamDelete(hdl->pal_handle, 0);
         DkObjectClose(hdl->pal_handle);
         hdl->pal_handle = NULL;
+        pal_handle_updated = true;
     }
 
     if (sock->domain != AF_UNIX) {
@@ -801,6 +765,7 @@ int shim_do_connect(int sockfd, struct sockaddr* addr, int _addrlen) {
     }
 
     hdl->pal_handle = pal_hdl;
+    pal_handle_updated = true;
 
     if (sock->domain == AF_UNIX) {
         struct shim_dentry* dent = sock->addr.un.dentry;
@@ -841,6 +806,10 @@ out:
             if (sock->addr.un.dentry)
                 put_dentry(sock->addr.un.dentry);
         }
+    }
+
+    if (pal_handle_updated) {
+        _update_epolls(hdl);
     }
 
     unlock(&hdl->lock);
@@ -1072,6 +1041,7 @@ static ssize_t do_sendmsg(int fd, struct iovec* bufs, int nbufs, int flags,
             }
 
             hdl->pal_handle = pal_hdl;
+            _update_epolls(hdl);
         }
 
         if (addr && addr->sa_family != sock->domain) {
@@ -1107,9 +1077,14 @@ static ssize_t do_sendmsg(int fd, struct iovec* bufs, int nbufs, int flags,
 
         if (pal_ret == PAL_STREAM_ERROR) {
             if (PAL_ERRNO() == EPIPE && !(flags & MSG_NOSIGNAL)) {
-                struct shim_thread* cur = get_cur_thread();
-                assert(cur);
-                (void)do_kill_proc(cur->tid, cur->tgid, SIGPIPE, /*use_ipc=*/false);
+                siginfo_t info = {
+                    .si_signo = SIGPIPE,
+                    .si_pid = g_process.pid,
+                    .si_code = SI_USER,
+                };
+                if (kill_current_proc(&info) < 0) {
+                    debug("do_sendmsg: failed to deliver a signal\n");
+                }
             }
 
             ret = (PAL_NATIVE_ERRNO() == PAL_ERROR_STREAMEXIST) ? -ECONNABORTED : -PAL_ERRNO();

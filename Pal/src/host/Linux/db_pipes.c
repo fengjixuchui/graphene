@@ -2,11 +2,16 @@
 /* Copyright (C) 2014 Stony Brook University */
 
 /*
- * db_pipes.c
- *
- * This file contains oeprands to handle streams with URIs that start with
- * "pipe:" or "pipe.srv:".
+ * This file contains operands to handle streams with URIs that start with "pipe:" or "pipe.srv:".
  */
+
+#include <asm/errno.h>
+#include <asm/fcntl.h>
+#include <asm/poll.h>
+#include <linux/time.h>
+#include <linux/types.h>
+#include <linux/un.h>
+#include <sys/socket.h>
 
 #include "api.h"
 #include "pal.h"
@@ -17,15 +22,6 @@
 #include "pal_linux.h"
 #include "pal_linux_defs.h"
 #include "pal_security.h"
-
-typedef __kernel_pid_t pid_t;
-#include <asm/errno.h>
-#include <asm/fcntl.h>
-#include <asm/poll.h>
-#include <linux/time.h>
-#include <linux/types.h>
-#include <linux/un.h>
-#include <sys/socket.h>
 
 static int pipe_addr(const char* name, struct sockaddr_un* addr) {
     /* use abstract UNIX sockets for pipes, with name format "@/graphene/<pipename>" */
@@ -259,16 +255,16 @@ static int pipe_open(PAL_HANDLE* handle, const char* type, const char* uri, int 
         !WITHIN_MASK(create, PAL_CREATE_MASK) || !WITHIN_MASK(options, PAL_OPTION_MASK))
         return -PAL_ERROR_INVAL;
 
-    if (!strcmp_static(type, URI_TYPE_PIPE) && !*uri)
+    if (!strcmp(type, URI_TYPE_PIPE) && !*uri)
         return pipe_private(handle, options);
 
     if (strlen(uri) + 1 > PIPE_NAME_MAX)
         return -PAL_ERROR_INVAL;
 
-    if (!strcmp_static(type, URI_TYPE_PIPE_SRV))
+    if (!strcmp(type, URI_TYPE_PIPE_SRV))
         return pipe_listen(handle, uri, options);
 
-    if (!strcmp_static(type, URI_TYPE_PIPE))
+    if (!strcmp(type, URI_TYPE_PIPE))
         return pipe_connect(handle, uri, options);
 
     return -PAL_ERROR_INVAL;

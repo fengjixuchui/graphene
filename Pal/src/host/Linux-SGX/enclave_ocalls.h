@@ -10,6 +10,7 @@
 #include "linux_types.h"
 #include "pal_linux.h"
 #include "sgx_attest.h"
+#include "sgx_rtld.h"
 
 noreturn void ocall_exit(int exitcode, int is_exitgroup);
 
@@ -68,9 +69,13 @@ int ocall_shutdown(int sockfd, int how);
 
 int ocall_resume_thread(void* tcs);
 
+int ocall_sched_setaffinity(void* tcs, size_t cpumask_size, void* cpu_mask);
+
+int ocall_sched_getaffinity(void* tcs, size_t cpumask_size, void* cpu_mask);
+
 int ocall_clone_thread(void);
 
-int ocall_create_process(const char* uri, int nargs, const char** args, int* stream_fd,
+int ocall_create_process(const char* uri, size_t nargs, const char** args, int* stream_fd,
                          unsigned int* pid);
 
 int ocall_futex(uint32_t* uaddr, int op, int val, int64_t timeout_us);
@@ -87,7 +92,9 @@ int ocall_rename(const char* oldpath, const char* newpath);
 
 int ocall_delete(const char* pathname);
 
-int ocall_load_debug(const char* command);
+int ocall_update_debugger(struct debug_map* _Atomic* debug_map);
+
+int ocall_report_mmap(const char* filename, uint64_t addr, uint64_t len, uint64_t offset);
 
 int ocall_eventfd(unsigned int initval, int flags);
 
@@ -97,10 +104,11 @@ int ocall_eventfd(unsigned int initval, int flags);
  * The obtained quote is not validated in any way (i.e., this function does not check whether the
  * returned quote corresponds to this enclave or whether its contents make sense).
  *
- * \param[in]  spid       Software provider ID (SPID).
- * \param[in]  linkable   Quote type (linkable vs unlinkable).
+ * \param[in]  spid       Software provider ID (SPID); if NULL then DCAP/ECDSA is used.
+ * \param[in]  linkable   Quote type (linkable vs unlinkable); ignored if DCAP/ECDSA is used.
  * \param[in]  report     Enclave report to be sent to the Quoting Enclave.
- * \param[in]  nonce      16B nonce to be included in the quote for freshness.
+ * \param[in]  nonce      16B nonce to be included in the quote for freshness; ignored if
+ *                        DCAP/ECDSA is used.
  * \param[out] quote      Quote returned by the Quoting Enclave (allocated via malloc() in this
  *                        function; the caller gets the ownership of the quote).
  * \param[out] quote_len  Length of the quote returned by the Quoting Enclave.

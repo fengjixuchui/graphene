@@ -1,9 +1,7 @@
 /* SPDX-License-Identifier: LGPL-3.0-or-later */
 /* Copyright (C) 2014 Stony Brook University */
 
-/*!
- * \file pal.h
- *
+/*
  * This file contains definition of PAL host ABI.
  */
 
@@ -14,6 +12,8 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <stdnoreturn.h>
+
+#include "toml.h"
 
 #if defined(__i386__) || defined(__x86_64__)
 #include "cpu.h"
@@ -127,16 +127,16 @@ typedef struct PAL_MEM_INFO_ {
 typedef struct PAL_CONTROL_ {
     PAL_STR host_type;
     PAL_NUM process_id; /*!< An identifier of current picoprocess */
-    PAL_NUM host_id;
 
     /*
      * Handles and executables
      */
-    PAL_HANDLE manifest_handle; /*!< program manifest */
-    PAL_STR executable;         /*!< executable name */
-    PAL_HANDLE parent_process;  /*!< handle of parent process */
-    PAL_HANDLE first_thread;    /*!< handle of first thread */
-    PAL_HANDLE debug_stream;    /*!< debug stream */
+
+    toml_table_t* manifest_root; /*!< program manifest */
+    PAL_STR executable;          /*!< executable name */
+    PAL_HANDLE parent_process;   /*!< handle of parent process */
+    PAL_HANDLE first_thread;     /*!< handle of first thread */
+    PAL_BOL enable_debug_log;    /*!< enable debug log calls */
 
     /*
      * Memory layout
@@ -363,6 +363,9 @@ PAL_NUM DkStreamRead(PAL_HANDLE handle, PAL_NUM offset, PAL_NUM count, PAL_PTR b
  *
  * If the handle is a file, `offset` must be specified at each call of DkStreamWrite. `dest` can be
  * used to specify the remote socket address if the handle is a UDP socket.
+ *
+ * \return number of bytes written if succeeded, PAL_STREAM_ERROR on failure (in which case
+ *  PAL_ERRNO() is set)
  */
 PAL_NUM DkStreamWrite(PAL_HANDLE handle, PAL_NUM offset, PAL_NUM count, PAL_PTR buffer,
                       PAL_STR dest);
@@ -428,7 +431,6 @@ typedef struct _PAL_STREAM_ATTR {
     PAL_BOL disconnected;
     PAL_BOL nonblocking;
     PAL_BOL readable, writable, runnable;
-    PAL_BOL secure;
     PAL_FLG share_flags;
     PAL_NUM pending_size;
     PAL_IDX no_of_fds;
@@ -513,6 +515,35 @@ noreturn void DkThreadExit(PAL_PTR clear_child_tid);
  * \brief Resume a thread.
  */
 PAL_BOL DkThreadResume(PAL_HANDLE thread);
+
+/*!
+ * \brief Sets the CPU affinity of a thread.
+ *
+ * All bit positions exceeding the count of host CPUs are ignored. Returns an error if no CPUs were
+ * selected.
+ *
+ * \param thread PAL thread for which to set the CPU affinity.
+ * \param cpumask_size size in bytes of the bitmask pointed by \a cpu_mask.
+ * \param cpu_mask pointer to the new CPU mask.
+ *
+ * \return Returns 1 on success, 0 on failure. Use PAL_ERRNO() to get the actual error code.
+ */
+PAL_BOL DkThreadSetCpuAffinity(PAL_HANDLE thread, PAL_NUM cpumask_size, PAL_PTR cpu_mask);
+
+/*!
+ * \brief Gets the CPU affinity of a thread.
+ *
+ * This function assumes that \a cpumask_size is valid and greater than 0. Also, \a cpumask_size
+ * must be able to fit all the processors in the host and must be aligned by sizeof(long). For
+ * example, if the host supports 4 CPUs, \a cpumask_size should be 8 bytes.
+ *
+ * \param thread PAL thread for which to get the CPU affinity.
+ * \param cpumask_size size in bytes of the bitmask pointed by \a cpu_mask.
+ * \param cpu_mask pointer to hold the current CPU mask.
+ *
+ * \return Returns 1 on success, 0 on failure. Use PAL_ERRNO() to get the actual error code.
+ */
+PAL_BOL DkThreadGetCpuAffinity(PAL_HANDLE thread, PAL_NUM cpumask_size, PAL_PTR cpu_mask);
 
 /*
  * Exception Handling
@@ -653,6 +684,17 @@ void DkObjectClose(PAL_HANDLE objectHandle);
  */
 
 /*!
+ * \brief Output a message to the debug stream.
+ *
+ * Works only if the debug stream has been initialized, which can be checked by looking at
+ * `g_pal_control.enable_debug_log`.
+ *
+ * \return number of bytes written if succeeded, PAL_STREAM_ERROR on failure (in which case
+ *  PAL_ERRNO() is set)
+ */
+PAL_NUM DkDebugLog(PAL_PTR buffer, PAL_NUM size);
+
+/*!
  * \brief Get the current time
  * \return the current time in microseconds
  */
@@ -673,20 +715,29 @@ PAL_NUM DkRandomBitsRead(PAL_PTR buffer, PAL_NUM size);
 PAL_BOL DkInstructionCacheFlush(PAL_PTR addr, PAL_NUM size);
 
 enum PAL_SEGMENT {
-    PAL_SEGMENT_FS = 0x1,
-    PAL_SEGMENT_GS = 0x2,
+    PAL_SEGMENT_FS = 1,
+    PAL_SEGMENT_GS,
 };
+
+/*!
+ * \brief Get segment register
+ *
+ * \param reg the register to get (#PAL_SEGMENT)
+ * \param addr the address where result will be stored
+ *
+ * \return true on success, false on error
+ */
+PAL_BOL DkSegmentRegisterGet(PAL_FLG reg, PAL_PTR* addr);
 
 /*!
  * \brief Set segment register
  *
  * \param reg the register to be set (#PAL_SEGMENT)
- * \param addr the address to be set; if `NULL`, return the current value of the
- *  segment register.
+ * \param addr the address to be set
  *
- * \todo Please note that this API is broken and doesn't allow setting segment base to 0.
+ * \return true on success, false on error
  */
-PAL_PTR DkSegmentRegister(PAL_FLG reg, PAL_PTR addr);
+PAL_BOL DkSegmentRegisterSet(PAL_FLG reg, PAL_PTR addr);
 
 /*!
  * \brief Return the amount of currently available memory for LibOS/application

@@ -7,6 +7,7 @@
 
 #include <linux/fcntl.h>
 
+#include "api.h"
 #include "list.h"
 #include "pal.h"
 #include "pal_debug.h"
@@ -14,7 +15,10 @@
 #include "shim_checkpoint.h"
 #include "shim_fs.h"
 #include "shim_internal.h"
+#include "shim_lock.h"
+#include "shim_process.h"
 #include "shim_utils.h"
+#include "toml.h"
 
 struct shim_fs {
     char name[8];
@@ -85,128 +89,171 @@ static struct shim_mount* alloc_mount(void) {
 static bool mount_migrated = false;
 
 static int __mount_root(struct shim_dentry** root) {
-    char type[CONFIG_MAX];
-    char uri[CONFIG_MAX];
     int ret = 0;
+    char* fs_root_type = NULL;
+    char* fs_root_uri  = NULL;
 
-    if (root_config && get_config(root_config, "fs.root.type", type, sizeof(type)) > 0 &&
-                       get_config(root_config, "fs.root.uri", uri, sizeof(uri)) > 0) {
-        debug("mounting root filesystem: %s from %s\n", type, uri);
-        if ((ret = mount_fs(type, uri, "/", NULL, root, 0)) < 0) {
-            debug("mounting root filesystem failed (%d)\n", ret);
-            return ret;
+    assert(g_manifest_root);
+
+    ret = toml_string_in(g_manifest_root, "fs.root.type", &fs_root_type);
+    if (ret < 0) {
+        debug("Cannot parse \'fs.root.type\' (the value must be put in double quotes!)\n");
+        ret = -EINVAL;
+        goto out;
+    }
+
+    ret = toml_string_in(g_manifest_root, "fs.root.uri", &fs_root_uri);
+    if (ret < 0) {
+        debug("Cannot parse \'fs.root.uri\' (the value must be put in double quotes!)\n");
+        ret = -EINVAL;
+        goto out;
+    }
+
+    if (fs_root_type && fs_root_uri) {
+        debug("Mounting root as %s filesystem: from %s to /\n", fs_root_type, fs_root_uri);
+        if ((ret = mount_fs(fs_root_type, fs_root_uri, "/", NULL, root, 0)) < 0) {
+            debug("Mounting root filesystem failed (%d)\n", ret);
+            goto out;
         }
-        return ret;
+    } else {
+        debug("Mounting root as chroot filesystem: from file:. to /\n");
+        if ((ret = mount_fs("chroot", URI_PREFIX_FILE, "/", NULL, root, 0)) < 0) {
+            debug("Mounting root filesystem failed (%d)\n", ret);
+            goto out;
+        }
     }
 
-    debug("mounting default root filesystem\n");
-    if ((ret = mount_fs("chroot", URI_PREFIX_FILE, "/", NULL, root, 0)) < 0) {
-        debug("mounting root filesystem failed (%d)\n", ret);
-    }
+    ret = 0;
+out:
+    free(fs_root_type);
+    free(fs_root_uri);
     return ret;
 }
 
 static int __mount_sys(struct shim_dentry* root) {
     int ret;
 
-    debug("mounting as proc filesystem: /proc\n");
-
+    debug("Mounting special proc filesystem: /proc\n");
     if ((ret = mount_fs("proc", NULL, "/proc", root, NULL, 0)) < 0) {
-        debug("mounting proc filesystem failed (%d)\n", ret);
+        debug("Mounting /proc filesystem failed (%d)\n", ret);
         return ret;
     }
 
-    debug("mounting as dev filesystem: /dev\n");
-
+    debug("Mounting special dev filesystem: /dev\n");
     struct shim_dentry* dev_dent = NULL;
     if ((ret = mount_fs("dev", NULL, "/dev", root, &dev_dent, 0)) < 0) {
-        debug("mounting dev filesystem failed (%d)\n", ret);
+        debug("Mounting dev filesystem failed (%d)\n", ret);
         return ret;
     }
 
-    debug("mounting as chroot filesystem: from dev:tty to /dev\n");
-
+    debug("Mounting terminal device /dev/tty under /dev\n");
     if ((ret = mount_fs("chroot", URI_PREFIX_DEV "tty", "/dev/tty", dev_dent, NULL, 0)) < 0) {
-        debug("mounting terminal device failed (%d)\n", ret);
+        debug("Mounting terminal device /dev/tty failed (%d)\n", ret);
         return ret;
     }
 
     return 0;
 }
 
-static int __mount_one_other(const char* key, int keylen) {
-    if (!root_config)
-        return 0;
+static int __mount_one_other(toml_table_t* mount) {
+    assert(mount);
 
-    char k[CONFIG_MAX];
-    char p[CONFIG_MAX];
-    char u[CONFIG_MAX];
-    char t[CONFIG_MAX];
-    char* uri = NULL;
     int ret;
+    const char* key = toml_table_key(mount);
 
-    memcpy(k, "fs.mount.", 9);
-    memcpy(k + 9, key, keylen);
-    char* kp = k + 9 + keylen;
-
-    memcpy(kp, ".path", 6);
-    if (get_config(root_config, k, p, sizeof(p)) <= 0)
+    toml_raw_t mount_type_raw = toml_raw_in(mount, "type");
+    if (!mount_type_raw) {
+        debug("Cannot find \'fs.mount.%s.type\'\n", key);
         return -EINVAL;
-
-    memcpy(kp, ".type", 6);
-    if (get_config(root_config, k, t, sizeof(t)) <= 0)
-        return -EINVAL;
-
-    memcpy(kp, ".uri", 5);
-    if (get_config(root_config, k, u, sizeof(u)) > 0)
-        uri = u;
-
-    debug("mounting as %s filesystem: from %s to %s\n", t, uri, p);
-
-    if ((ret = mount_fs(t, uri, p, NULL, NULL, 1)) < 0) {
-        debug("mounting %s on %s (type=%s) failed (%d)\n", uri, p, t, -ret);
-        return ret;
     }
 
-    return 0;
+    toml_raw_t mount_path_raw = toml_raw_in(mount, "path");
+    if (!mount_path_raw) {
+        debug("Cannot find \'fs.mount.%s.path\'\n", key);
+        return -EINVAL;
+    }
+
+    toml_raw_t mount_uri_raw = toml_raw_in(mount, "uri");
+    if (!mount_uri_raw) {
+        debug("Cannot find \'fs.mount.%s.uri\'\n", key);
+        return -EINVAL;
+    }
+
+    char* mount_type = NULL;
+    char* mount_path = NULL;
+    char* mount_uri  = NULL;
+
+    ret = toml_rtos(mount_type_raw, &mount_type);
+    if (ret < 0) {
+        debug("Cannot parse \'fs.mount.%s.type\' (the value must be put in double quotes!)\n", key);
+        ret = -EINVAL;
+        goto out;
+    }
+
+    ret = toml_rtos(mount_path_raw, &mount_path);
+    if (ret < 0) {
+        debug("Cannot parse \'fs.mount.%s.path\' (the value must be put in double quotes!)\n", key);
+        ret = -EINVAL;
+        goto out;
+    }
+
+    ret = toml_rtos(mount_uri_raw, &mount_uri);
+    if (ret < 0) {
+        debug("Cannot parse \'fs.mount.%s.uri\' (the value must be put in double quotes!)\n", key);
+        ret = -EINVAL;
+        goto out;
+    }
+
+    debug("Mounting as %s filesystem: from %s to %s\n", mount_type, mount_uri, mount_path);
+
+    if (!strcmp(mount_path, "/")) {
+        debug("Root mount / already exists, verify that there are no duplicate mounts in manifest\n"
+              "(note that root / is automatically mounted in Graphene and can be changed via "
+              "\'fs.root\' manifest entry).\n");
+        ret = -EEXIST;
+        goto out;
+    }
+
+    if ((ret = mount_fs(mount_type, mount_uri, mount_path, NULL, NULL, 1)) < 0) {
+        debug("Mounting %s on %s (type=%s) failed (%d)\n", mount_uri, mount_path, mount_type,
+              -ret);
+        goto out;
+    }
+
+    ret = 0;
+out:
+    free(mount_type);
+    free(mount_path);
+    free(mount_uri);
+    return ret;
 }
 
 static int __mount_others(void) {
-    char* keybuf;
     int ret = 0;
 
-    if (!root_config)
+    assert(g_manifest_root);
+    toml_table_t* manifest_fs = toml_table_in(g_manifest_root, "fs");
+    if (!manifest_fs)
         return 0;
 
-    int nkeys;
-    ssize_t keybuf_size;
-    keybuf_size = get_config_entries_size(root_config, "fs.mount");
-    if (keybuf_size < 0)
+    toml_table_t* manifest_fs_mounts = toml_table_in(manifest_fs, "mount");
+    if (!manifest_fs_mounts)
         return 0;
 
-    keybuf = malloc(keybuf_size);
-    if (!keybuf)
-        return -ENOMEM;
+    ssize_t mounts_cnt = toml_table_ntab(manifest_fs_mounts);
+    if (mounts_cnt <= 0)
+        return 0;
 
-    nkeys = get_config_entries(root_config, "fs.mount", keybuf, keybuf_size);
+    for (ssize_t i = 0; i < mounts_cnt; i++) {
+        const char* mount_key = toml_key_in(manifest_fs_mounts, i);
+        assert(mount_key);
 
-    if (nkeys <= 0)
-        goto out;
-
-    const char* key  = keybuf;
-    const char* next = NULL;
-    for (int n = 0; n < nkeys; key = next, n++) {
-        for (next = key; *next; next++)
-            ;
-        next++;
-        ret = __mount_one_other(key, next - key - 1);
+        toml_table_t* mount = toml_table_in(manifest_fs_mounts, mount_key);
+        ret = __mount_one_other(mount);
         if (ret < 0)
-            goto out;
+            return ret;
     }
-
-out:
-    free(keybuf);
-    return ret;
+    return 0;
 }
 
 int init_mount_root(void) {
@@ -233,6 +280,30 @@ int init_mount(void) {
 
     if ((ret = __mount_others()) < 0)
         return ret;
+
+    assert(g_manifest_root);
+
+    char* fs_start_dir = NULL;
+    ret = toml_string_in(g_manifest_root, "fs.start_dir", &fs_start_dir);
+    if (ret < 0) {
+        debug("Can't parse \"fs.start_dir\" (note that the value must be put in double quotes)!\n");
+        return ret;
+    }
+
+    if (fs_start_dir) {
+        struct shim_dentry* dent = NULL;
+        ret = path_lookupat(NULL, fs_start_dir, 0, &dent, NULL);
+        free(fs_start_dir);
+        if (ret < 0) {
+            debug("Invalid \"fs.start_dir\" in manifest.\n");
+            return ret;
+        }
+        lock(&g_process.fs_lock);
+        put_dentry(g_process.cwd);
+        g_process.cwd = dent;
+        unlock(&g_process.fs_lock);
+    }
+    /* Otherwise `cwd` is already initialized. */
 
     return 0;
 }
@@ -383,6 +454,7 @@ int mount_fs(const char* type, const char* uri, const char* mount_point, struct 
     size_t last_len;
     find_last_component(mount_point, &last, &last_len);
 
+    bool need_parent_put = false;
     lock(&dcache_lock);
 
     if (!parent) {
@@ -398,6 +470,7 @@ int mount_fs(const char* type, const char* uri, const char* mount_point, struct 
                 debug("Path lookup failed %d\n", ret);
                 goto out_with_unlock;
             }
+            need_parent_put = true;
         }
     }
 
@@ -440,7 +513,12 @@ int mount_fs(const char* type, const char* uri, const char* mount_point, struct 
         }
     }
 
-    assert(dent == dentry_root || !(dent->state & DENTRY_VALID));
+    if (dent != dentry_root && dent->state & DENTRY_VALID) {
+        debug("Mount %s already exists, verify that there are no duplicate mounts in manifest\n"
+              "(note that /proc and /dev are automatically mounted in Graphene).\n", mount_point);
+        ret = -EEXIST;
+        goto out_with_unlock;
+    }
 
     // We need to fix up the relative path to this mount, but only for
     // directories.
@@ -469,11 +547,17 @@ int mount_fs(const char* type, const char* uri, const char* mount_point, struct 
     /* Set the file system at the mount point properly */
     dent->fs = mount;
 
-    if (dentp && !ret)
+    if (dentp && !ret) {
         *dentp = dent;
+    } else {
+        put_dentry(dent);
+    }
 
 out_with_unlock:
     unlock(&dcache_lock);
+    if (need_parent_put) {
+        put_dentry(parent);
+    }
 out:
     return ret;
 }

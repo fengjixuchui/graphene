@@ -2,12 +2,8 @@
 /* Copyright (C) 2014 Stony Brook University */
 
 /*
- * db_rtld.c
- *
- * This file contains utilities to load ELF binaries into the memory
- * and link them against each other.
- * The source code in this file is imported and modified from the GNU C
- * Library.
+ * This file contains utilities to load ELF binaries into the memory and link them against each
+ * other. The source code in this file was imported from the GNU C Library and modified.
  */
 
 #include <stdbool.h>
@@ -125,7 +121,7 @@ static struct link_map* map_elf_object_by_handle(PAL_HANDLE handle, enum object_
     int ret;
 
     if (handle == NULL) {
-        print_error("cannot stat shared object", -PAL_ERROR_INVAL);
+        print_error("cannot stat shared object", PAL_ERROR_INVAL);
         return NULL;
     }
 
@@ -147,7 +143,7 @@ static struct link_map* map_elf_object_by_handle(PAL_HANDLE handle, enum object_
         phdr = (ElfW(Phdr)*)malloc(maplength);
 
         if ((ret = _DkStreamRead(handle, header->e_phoff, maplength, phdr, NULL, 0)) < 0) {
-            print_error("cannot read file data", ret);
+            print_error("cannot read file data", -ret);
             return NULL;
         }
     }
@@ -190,13 +186,13 @@ static struct link_map* map_elf_object_by_handle(PAL_HANDLE handle, enum object_
                 /* A load command tells us to map in part of the file.
                    We record the load commands and process them all later.  */
                 if (!IS_ALLOC_ALIGNED(ph->p_align)) {
-                    print_error("ELF load command alignment not aligned", -PAL_ERROR_NOMEM);
+                    print_error("ELF load command alignment not aligned", PAL_ERROR_NOMEM);
                     return NULL;
                 }
 
                 if (!IS_ALIGNED_POW2(ph->p_vaddr - ph->p_offset, ph->p_align)) {
                     print_error("ELF load command address/offset not properly aligned",
-                                -PAL_ERROR_NOMEM);
+                                PAL_ERROR_NOMEM);
                     return NULL;
                 }
 
@@ -241,7 +237,7 @@ static struct link_map* map_elf_object_by_handle(PAL_HANDLE handle, enum object_
         /* This only happens for a bogus object that will be caught with
            another error below.  But we don't want to go through the
            calculations below using NLOADCMDS - 1.  */
-        print_error("object file has no loadable segments", -PAL_ERROR_INVAL);
+        print_error("object file has no loadable segments", PAL_ERROR_INVAL);
         return NULL;
     }
 
@@ -265,7 +261,7 @@ static struct link_map* map_elf_object_by_handle(PAL_HANDLE handle, enum object_
         ret = _DkStreamMap(handle, (void**)&mapaddr, APPEND_WRITECOPY(c->prot), c->mapoff,
                            maplength);
         if (ret < 0) {
-            print_error("failed to map dynamic segment from shared object", ret);
+            print_error("failed to map dynamic segment from shared object", -ret);
             return NULL;
         }
 
@@ -296,7 +292,7 @@ static struct link_map* map_elf_object_by_handle(PAL_HANDLE handle, enum object_
 
             if ((ret = _DkStreamMap(handle, &mapaddr, APPEND_WRITECOPY(c->prot), c->mapoff,
                                     c->mapend - c->mapstart)) < 0) {
-                print_error("failed to map segment from shared object", ret);
+                print_error("failed to map segment from shared object", -ret);
                 return NULL;
             }
         }
@@ -331,7 +327,7 @@ static struct link_map* map_elf_object_by_handle(PAL_HANDLE handle, enum object_
                         _DkVirtualMemoryProtect((void*)ALLOC_ALIGN_DOWN(zero),
                                                 g_pal_state.alloc_align, c->prot | PAL_PROT_WRITE);
                     if (ret < 0) {
-                        print_error("cannot change memory protections", ret);
+                        print_error("cannot change memory protections", -ret);
                         return NULL;
                     }
                 }
@@ -346,7 +342,7 @@ static struct link_map* map_elf_object_by_handle(PAL_HANDLE handle, enum object_
                 void* mapat = (void*)zerosec;
                 ret = _DkVirtualMemoryAlloc(&mapat, zeroend - zerosec, 0, c->prot);
                 if (ret < 0) {
-                    print_error("cannot map zero-fill allocation", ret);
+                    print_error("cannot map zero-fill allocation", -ret);
                     return NULL;
                 }
             }
@@ -357,7 +353,7 @@ static struct link_map* map_elf_object_by_handle(PAL_HANDLE handle, enum object_
 
     if (l->l_ld == 0) {
         if (e_type == ET_DYN) {
-            print_error("object file has no dynamic section", -PAL_ERROR_INVAL);
+            print_error("object file has no dynamic section", PAL_ERROR_INVAL);
             return NULL;
         }
     } else {
@@ -375,7 +371,7 @@ static struct link_map* map_elf_object_by_handle(PAL_HANDLE handle, enum object_
            temporary place.  */
         ElfW(Phdr)* newp = (ElfW(Phdr)*)malloc(header->e_phnum * sizeof(ElfW(Phdr)));
         if (!newp) {
-            print_error("cannot allocate memory for program header", -PAL_ERROR_NOMEM);
+            print_error("cannot allocate memory for program header", PAL_ERROR_NOMEM);
             return NULL;
         }
 
@@ -886,7 +882,7 @@ void DkDebugAttachBinary(PAL_STR uri, PAL_PTR start_addr) {
     __UNUSED(uri);
     __UNUSED(start_addr);
 #else
-    if (!strstartswith_static(uri, URI_PREFIX_FILE) || !start_addr)
+    if (!strstartswith(uri, URI_PREFIX_FILE) || !start_addr)
         return;
 
     const char* realname = uri + URI_PREFIX_FILE_LEN;
@@ -908,9 +904,9 @@ void DkDebugAttachBinary(PAL_STR uri, PAL_PTR start_addr) {
     for (ph = phdr; ph < &phdr[l->l_phnum]; ++ph)
         if (ph->p_type == PT_PHDR) {
             if (!map_start || ph->p_vaddr < map_start)
-                map_start = ph->p_vaddr;
+                map_start = ALLOC_ALIGN_DOWN(ph->p_vaddr);
             if (!map_end || ph->p_vaddr + ph->p_memsz > map_end)
-                map_end = ph->p_vaddr + ph->p_memsz;
+                map_end = ALLOC_ALIGN_UP(ph->p_vaddr + ph->p_memsz);
         }
 
     l->l_addr    = l->l_map_start - map_start;
@@ -960,6 +956,8 @@ void DkDebugDetachBinary(PAL_PTR start_addr) {
 #ifdef __x86_64__
 void* stack_before_call __attribute_unused = NULL;
 
+/* TODO: Why on earth do we call loaded libraries entry points?!?
+ * I won't bother fixing this asm, it needs to be purged. */
 #define CALL_ENTRY(l, cookies)                                                       \
     ({                                                                               \
         long ret;                                                                    \

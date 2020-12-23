@@ -5,8 +5,6 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#define __KERNEL__
-
 #include <asm/poll.h>
 #include <asm/posix_types.h>
 #include <asm/siginfo.h>
@@ -289,19 +287,6 @@ struct iovec {
     size_t iov_len; /* Length of data. */
 };
 
-/* bits/sched.h */
-/* Type for array elements in 'cpu_set_t'.  */
-typedef unsigned long int __kernel_cpu_mask;
-
-/* Size definition for CPU sets.  */
-#define __CPU_SETSIZE 1024
-#define __NCPUBITS    (8 * sizeof(__kernel_cpu_mask))
-
-/* Data structure to describe CPU mask.  */
-typedef struct {
-    __kernel_cpu_mask __bits[__CPU_SETSIZE / __NCPUBITS];
-} __kernel_cpu_set_t;
-
 struct getcpu_cache {
     unsigned long blob[128 / sizeof(long)];
 };
@@ -354,7 +339,6 @@ typedef Elf64_auxv_t elf_auxv_t;
 /* typedef for shim internal types */
 typedef unsigned int IDTYPE;
 typedef uint16_t FDTYPE;
-typedef unsigned long LEASETYPE;
 typedef uint64_t HASHTYPE;
 
 typedef struct atomic_int REFTYPE;

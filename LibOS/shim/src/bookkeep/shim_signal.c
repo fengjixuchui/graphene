@@ -1,5 +1,8 @@
 /* SPDX-License-Identifier: LGPL-3.0-or-later */
-/* Copyright (C) 2014 Stony Brook University */
+/* Copyright (C) 2014 Stony Brook University
+ * Copyright (C) 2020 Intel Corporation
+ *                    Borys Popławski <borysp@invisiblethingslab.com>
+ */
 
 /*
  * This file contains code for handling signals and exceptions passed from PAL.
@@ -17,11 +20,13 @@
 #include "shim_checkpoint.h"
 #include "shim_handle.h"
 #include "shim_internal.h"
+#include "shim_lock.h"
+#include "shim_process.h"
 #include "shim_signal.h"
 #include "shim_table.h"
 #include "shim_thread.h"
-#include "shim_ucontext-arch.h"
 #include "shim_types.h"
+#include "shim_ucontext-arch.h"
 #include "shim_utils.h"
 #include "shim_vma.h"
 
@@ -39,9 +44,9 @@ void sigaction_make_defaults(struct __kernel_sigaction* sig_action) {
 }
 
 void thread_sigaction_reset_on_execve(struct shim_thread* thread) {
-    lock(&thread->signal_handles->lock);
-    for (size_t i = 0; i < ARRAY_SIZE(thread->signal_handles->actions); i++) {
-        struct __kernel_sigaction* sig_action = &thread->signal_handles->actions[i];
+    lock(&thread->signal_dispositions->lock);
+    for (size_t i = 0; i < ARRAY_SIZE(thread->signal_dispositions->actions); i++) {
+        struct __kernel_sigaction* sig_action = &thread->signal_dispositions->actions[i];
 
         __sighandler_t handler = sig_action->k_sa_handler;
         if (handler == (void*)SIG_DFL || handler == (void*)SIG_IGN) {
@@ -53,7 +58,7 @@ void thread_sigaction_reset_on_execve(struct shim_thread* thread) {
         /* app installed its own signal handler, reset it to default */
         sigaction_make_defaults(sig_action);
     }
-    unlock(&thread->signal_handles->lock);
+    unlock(&thread->signal_dispositions->lock);
 }
 
 static __rt_sighandler_t default_sighandler[NUM_SIGS];
@@ -210,11 +215,20 @@ static struct shim_signal* process_pop_signal(int sig) {
     return signal;
 }
 
+void clear_signal_queue(struct shim_signal_queue* queue) {
+    for (int sig = 1; sig <= NUM_SIGS; sig++) {
+        struct shim_signal* signal;
+        while ((signal = queue_pop_signal(queue, sig))) {
+            free(signal);
+        }
+    }
+}
+
 static void __handle_one_signal(shim_tcb_t* tcb, struct shim_signal* signal);
 
 static void __store_info(siginfo_t* info, struct shim_signal* signal) {
     if (info)
-        memcpy(&signal->info, info, sizeof(siginfo_t));
+        signal->info = *info;
 }
 
 void __store_context(shim_tcb_t* tcb, PAL_CONTEXT* pal_context, struct shim_signal* signal) {
@@ -241,10 +255,7 @@ void deliver_signal(siginfo_t* info, PAL_CONTEXT* context) {
     assert(tcb);
 
     struct shim_thread* cur_thread = (struct shim_thread*)tcb->tp;
-    // Signals should not be delivered before the user process starts
-    // or after the user process dies.
-    if (!cur_thread || !cur_thread->is_alive)
-        return;
+    assert(cur_thread);
 
     int sig = info->si_signo;
 
@@ -262,7 +273,7 @@ void deliver_signal(siginfo_t* info, PAL_CONTEXT* context) {
         if (signal) {
             if (!append_thread_signal(cur_thread, signal)) {
                 debug("Signal %d queue of thread %u is full, dropping the incoming signal\n", sig,
-                      tcb->tid);
+                      cur_thread->tid);
                 free(signal);
             }
         }
@@ -298,12 +309,12 @@ static noreturn void internal_fault(const char* errstr, PAL_NUM addr, PAL_CONTEX
     PAL_NUM ip = pal_context_get_ip(context);
 
     if (context_is_internal(context))
-        SYS_PRINTF("%s at 0x%08lx (IP = +0x%lx, VMID = %u, TID = %u)\n", errstr, addr,
-                   (void*)ip - (void*)&__load_address, cur_process.vmid,
-                   is_internal_tid(tid) ? 0 : tid);
+        warn("%s at 0x%08lx (IP = +0x%lx, VMID = %u, TID = %u)\n", errstr, addr,
+             (void*)ip - (void*)&__load_address, g_process_ipc_info.vmid,
+             is_internal_tid(tid) ? 0 : tid);
     else
-        SYS_PRINTF("%s at 0x%08lx (IP = 0x%08lx, VMID = %u, TID = %u)\n", errstr, addr,
-                   context ? ip : 0, cur_process.vmid, is_internal_tid(tid) ? 0 : tid);
+        warn("%s at 0x%08lx (IP = 0x%08lx, VMID = %u, TID = %u)\n", errstr, addr,
+             context ? ip : 0, g_process_ipc_info.vmid, is_internal_tid(tid) ? 0 : tid);
 
     DEBUG_BREAK_ON_FAILURE();
     DkProcessExit(1);
@@ -408,7 +419,7 @@ static bool is_sgx_pal(void) {
 
     if (!__atomic_load_n(&inited.counter, __ATOMIC_SEQ_CST)) {
         /* Ensure that is_sgx_pal is updated before initialized */
-        __atomic_store_n(&sgx_pal.counter, !strcmp_static(PAL_CB(host_type), "Linux-SGX"),
+        __atomic_store_n(&sgx_pal.counter, !strcmp(PAL_CB(host_type), "Linux-SGX"),
                          __ATOMIC_SEQ_CST);
         __atomic_store_n(&inited.counter, 1, __ATOMIC_SEQ_CST);
     }
@@ -450,7 +461,7 @@ bool test_user_memory(void* addr, size_t size, bool write) {
     tcb->test_range.start     = addr;
     tcb->test_range.end       = addr + size - 1;
     /* enforce compiler to store tcb->test_range into memory */
-    __asm__ volatile("" ::: "memory");
+    COMPILER_BARRIER();
 
     /* Try to read or write into one byte inside each page */
     void* tmp = addr;
@@ -465,7 +476,7 @@ bool test_user_memory(void* addr, size_t size, bool write) {
 
 ret_fault:
     /* enforce compiler to load tcb->test_range.has_fault below */
-    __asm__ volatile("" : "=m"(tcb->test_range.has_fault));
+    COMPILER_BARRIER();
 
     /* If any read or write into the target region causes an exception,
      * the control flow will immediately jump to here. */
@@ -516,7 +527,7 @@ bool test_user_string(const char* addr) {
     tcb->test_range.has_fault = false;
     tcb->test_range.cont_addr = &&ret_fault;
     /* enforce compiler to store tcb->test_range into memory */
-    __asm__ volatile("" ::: "memory");
+    COMPILER_BARRIER();
 
     do {
         /* Add the memory region to the watch list. This is not racy because
@@ -537,7 +548,7 @@ bool test_user_string(const char* addr) {
 
 ret_fault:
     /* enforce compiler to load tcb->test_range.has_fault below */
-    __asm__ volatile("" : "=m"(tcb->test_range.has_fault));
+    COMPILER_BARRIER();
 
     /* If any read or write into the target region causes an exception,
      * the control flow will immediately jump to here. */
@@ -547,14 +558,6 @@ ret_fault:
     tcb->test_range.start = tcb->test_range.end = NULL;
     __enable_preempt(tcb);
     return has_fault;
-}
-
-void __attribute__((weak)) syscall_wrapper(void) {
-    /*
-     * work around for link.
-     * syscalldb.S is excluded for libsysdb_debug.so so it fails to link
-     * due to missing syscall_wrapper.
-     */
 }
 
 static void illegal_upcall(PAL_PTR event, PAL_NUM arg, PAL_CONTEXT* context) {
@@ -618,8 +621,13 @@ static void illegal_upcall(PAL_PTR event, PAL_NUM arg, PAL_CONTEXT* context) {
 static void quit_upcall(PAL_PTR event, PAL_NUM arg, PAL_CONTEXT* context) {
     __UNUSED(arg);
     __UNUSED(context);
-    if (!is_internal_tid(get_cur_tid())) {
-        (void)do_kill_proc(0, get_cur_thread()->tgid, SIGTERM, /*use_ipc=*/false);
+    siginfo_t info = {
+        .si_signo = SIGTERM,
+        .si_pid = 0,
+        .si_code = SI_USER,
+    };
+    if (kill_current_proc(&info) < 0) {
+        debug("quit_upcall: failed to deliver a signal\n");
     }
     DkExceptionReturn(event);
 }
@@ -627,8 +635,13 @@ static void quit_upcall(PAL_PTR event, PAL_NUM arg, PAL_CONTEXT* context) {
 static void suspend_upcall(PAL_PTR event, PAL_NUM arg, PAL_CONTEXT* context) {
     __UNUSED(arg);
     __UNUSED(context);
-    if (!is_internal_tid(get_cur_tid())) {
-        (void)do_kill_proc(0, get_cur_thread()->tgid, SIGINT, /*use_ipc=*/false);
+    siginfo_t info = {
+        .si_signo = SIGINT,
+        .si_pid = 0,
+        .si_code = SI_USER,
+    };
+    if (kill_current_proc(&info) < 0) {
+        debug("suspend_upcall: failed to deliver a signal\n");
     }
     DkExceptionReturn(event);
 }
@@ -659,35 +672,29 @@ int init_signal(void) {
     return 0;
 }
 
-__sigset_t* get_sig_mask(struct shim_thread* thread) {
-    if (!thread)
-        thread = get_cur_thread();
-
-    assert(thread);
-
-    return &(thread->signal_mask);
+void clear_illegal_signals(__sigset_t* set) {
+    __sigdelset(set, SIGKILL);
+    __sigdelset(set, SIGSTOP);
 }
 
-__sigset_t* set_sig_mask(struct shim_thread* thread, const __sigset_t* set) {
-    if (!thread)
-        thread = get_cur_thread();
-
+void get_sig_mask(struct shim_thread* thread, __sigset_t* mask) {
     assert(thread);
 
-    if (set) {
-        memcpy(&thread->signal_mask, set, sizeof(__sigset_t));
-
-        /* SIGKILL and SIGSTOP cannot be ignored */
-        __sigdelset(&thread->signal_mask, SIGKILL);
-        __sigdelset(&thread->signal_mask, SIGSTOP);
-    }
-
-    return &thread->signal_mask;
+    *mask = thread->signal_mask;
 }
 
-static __rt_sighandler_t get_sighandler(struct shim_thread* thread, int sig, bool allow_reset) {
-    lock(&thread->signal_handles->lock);
-    struct __kernel_sigaction* sig_action = &thread->signal_handles->actions[sig - 1];
+void set_sig_mask(struct shim_thread* thread, const __sigset_t* set) {
+    assert(thread);
+    assert(set);
+    assert(locked(&thread->lock));
+
+    thread->signal_mask = *set;
+}
+
+static void get_sighandler(struct shim_thread* thread, int sig, bool allow_reset,
+                           __rt_sighandler_t* handler_ptr, unsigned long* sa_flags_ptr) {
+    lock(&thread->signal_dispositions->lock);
+    struct __kernel_sigaction* sig_action = &thread->signal_dispositions->actions[sig - 1];
 
     /*
      * on amd64, sa_handler can be treated as sa_sigaction
@@ -699,27 +706,32 @@ static __rt_sighandler_t get_sighandler(struct shim_thread* thread, int sig, boo
 #endif
 
     __rt_sighandler_t handler = (void*)sig_action->k_sa_handler;
-    if (allow_reset && sig_action->sa_flags & SA_RESETHAND) {
-        sigaction_make_defaults(sig_action);
-    }
-
     if ((void*)handler == (void*)SIG_IGN) {
         handler = NULL;
     } else if ((void*)handler == (void*)SIG_DFL) {
         handler = default_sighandler[sig - 1];
     }
 
-    unlock(&thread->signal_handles->lock);
-    return handler;
+    unsigned long sa_flags = sig_action->sa_flags;
+
+    if (allow_reset && handler && sa_flags & SA_RESETHAND) {
+        sigaction_make_defaults(sig_action);
+    }
+
+    unlock(&thread->signal_dispositions->lock);
+
+    *handler_ptr = handler;
+    *sa_flags_ptr = sa_flags;
 }
 
 static void __handle_one_signal(shim_tcb_t* tcb, struct shim_signal* signal) {
     struct shim_thread* thread = (struct shim_thread*)tcb->tp;
     __rt_sighandler_t handler = NULL;
+    unsigned long sa_flags = 0;
 
     int sig = signal->info.si_signo;
 
-    handler = get_sighandler(thread, sig, /*allow_reset=*/true);
+    get_sighandler(thread, sig, /*allow_reset=*/true, &handler, &sa_flags);
 
     if (!handler)
         return;
@@ -743,7 +755,20 @@ static void __handle_one_signal(shim_tcb_t* tcb, struct shim_signal* signal) {
 
     (*handler)(sig, &signal->info, &signal->context);
 
-    __atomic_store_n(&thread->signal_handled, true, __ATOMIC_RELEASE);
+    if (sa_flags & SA_RESTART) {
+        unsigned char signal_handled = __atomic_load_n(&thread->signal_handled, __ATOMIC_ACQUIRE);
+        /* Do not overwrite `SIGNAL_HANDLED`, as we want to keep information about signals that do
+         * not cause syscall restarts. */
+        while (signal_handled != SIGNAL_HANDLED) {
+            if (__atomic_compare_exchange_n(&thread->signal_handled, &signal_handled,
+                                            SIGNAL_HANDLED_RESTART, /*weak=*/true,
+                                            __ATOMIC_RELEASE, __ATOMIC_ACQUIRE)) {
+                break;
+            }
+        }
+    } else {
+        __atomic_store_n(&thread->signal_handled, SIGNAL_HANDLED, __ATOMIC_RELEASE);
+    }
 
     if (context)
         tcb->context = *context;
@@ -796,13 +821,13 @@ void handle_signals(void) {
     shim_tcb_t* tcb = shim_get_tcb();
     assert(tcb);
 
-    int64_t preempt = __disable_preempt(tcb);
-
-    if (preempt > 1)
-        debug("signal delayed (%ld)\n", preempt);
-    else
+    int64_t preempt_level = __disable_preempt(tcb);
+    if (preempt_level == 1) {
+        /* upon entering this function, preempt level was 0 and thus we can handle signals now
+         * (otherwise preempt level was 1+, indicating that we are in signal handler; we don't
+         * support nested sighandling so we defer such signals until preempt level is 0 again) */
         __handle_signals(tcb);
-
+    }
     __enable_preempt(tcb);
 }
 
@@ -916,7 +941,7 @@ BEGIN_CP_FUNC(pending_signals) {
          * thread existing. */
         struct shim_signal* signal = __atomic_load_n(q, __ATOMIC_ACQUIRE);
         if (signal) {
-            memcpy(&infos[i], &signal->info, sizeof(infos[i]));
+            infos[i] = signal->info;
             i++;
         }
     }
@@ -925,7 +950,7 @@ BEGIN_CP_FUNC(pending_signals) {
         struct shim_rt_signal_queue* q = &process_signal_queue.rt_signal_queues[sig - SIGRTMIN];
         uint64_t idx = __atomic_load_n(&q->put_idx, __ATOMIC_ACQUIRE);
         while (__atomic_load_n(&q->get_idx, __ATOMIC_ACQUIRE) < idx && i < n) {
-            memcpy(&infos[i], &q->queue[(idx - 1) % ARRAY_SIZE(q->queue)]->info, sizeof(infos[i]));
+            infos[i] = q->queue[(idx - 1) % ARRAY_SIZE(q->queue)]->info;
             idx--;
             i++;
         }
@@ -953,7 +978,7 @@ BEGIN_RS_FUNC(pending_signals) {
 
         assert(infos[i].si_signo);
 
-        memcpy(&signal->info, &infos[i], sizeof(signal->info));
+        signal->info = infos[i];
         signal->context_stored = false;
         signal->pal_context    = NULL;
         if (!append_process_signal(signal)) {

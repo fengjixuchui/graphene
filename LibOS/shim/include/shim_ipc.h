@@ -2,8 +2,6 @@
 /* Copyright (C) 2014 Stony Brook University */
 
 /*
- * shim_ipc.h
- *
  * Definitions of types and functions for IPC bookkeeping.
  */
 
@@ -30,28 +28,17 @@
 #define MAX_IPC_PORT_FINI_CB 3
 
 enum {
-    IPC_LISTEN,       /* listening */
-    IPC_SERVER,       /* connect as a server */
-    IPC_KEEPALIVE,    /* keep the connetion alive */
-    IPC_DIRECTCHILD,  /* direct child */
-    IPC_DIRECTPARENT, /* direct parent */
-    IPC_CLIENT,       /* pid/sysv namespace client */
-    IPC_LEADER,       /* pid/sysv namespace leader */
-    IPC_OWNER,        /* pid/sysv namespace owner */
-    IPC_CONNECTION,   /* pid/sysv namespace connection */
+    IPC_LISTENING,    /* listening port; processes connect to it to create connection ports */
+    IPC_CONNECTION,   /* processes communicate on ports of this type */
+    IPC_DIRECTCHILD,  /* direct child: used to broadcast messages to children processes */
+    IPC_DIRECTPARENT, /* direct parent: used to broadcast messages to parent process */
 };
 
 enum {
-    IPC_PORT_LISTEN       = 1 << IPC_LISTEN,
-    IPC_PORT_SERVER       = 1 << IPC_SERVER,
-    IPC_PORT_KEEPALIVE    = 1 << IPC_KEEPALIVE,
+    IPC_PORT_LISTENING    = 1 << IPC_LISTENING,
+    IPC_PORT_CONNECTION   = 1 << IPC_CONNECTION,
     IPC_PORT_DIRECTCHILD  = 1 << IPC_DIRECTCHILD,
     IPC_PORT_DIRECTPARENT = 1 << IPC_DIRECTPARENT,
-
-    IPC_PORT_CLIENT     = 1 << IPC_CLIENT,
-    IPC_PORT_LEADER     = 1 << IPC_LEADER,
-    IPC_PORT_OWNER      = 1 << IPC_OWNER,
-    IPC_PORT_CONNECTION = 1 << IPC_CONNECTION,
 };
 
 enum {
@@ -99,16 +86,15 @@ struct shim_ipc_info {
     REFTYPE ref_count;
 };
 
-struct shim_process {
+struct shim_process_ipc_info {
     IDTYPE vmid;
     struct shim_lock lock;
-    int exit_code;
     struct shim_ipc_info* self;
     struct shim_ipc_info* parent;
     struct shim_ipc_info* ns;
 };
 
-extern struct shim_process cur_process;
+extern struct shim_process_ipc_info g_process_ipc_info;
 
 struct shim_ipc_msg {
     unsigned char code;
@@ -130,7 +116,7 @@ struct shim_ipc_msg_with_ack {
     struct shim_ipc_msg msg;
 };
 
-typedef void (*port_fini)(struct shim_ipc_port*, IDTYPE vmid, unsigned int exitcode);
+typedef void (*port_fini)(struct shim_ipc_port*, IDTYPE vmid);
 
 DEFINE_LIST(shim_ipc_port);
 DEFINE_LISTP(shim_ipc_msg_with_ack);
@@ -149,7 +135,7 @@ struct shim_ipc_port {
 };
 
 /* common functions for pid & sysv namespaces */
-int add_ipc_subrange(IDTYPE idx, IDTYPE owner, const char* uri, LEASETYPE* lease);
+int add_ipc_subrange(IDTYPE idx, IDTYPE owner, const char* uri);
 IDTYPE allocate_ipc_id(IDTYPE min, IDTYPE max);
 void release_ipc_id(IDTYPE idx);
 
@@ -173,7 +159,6 @@ struct shim_ipc_resp {
 struct ipc_ns_offered {
     IDTYPE base;
     IDTYPE size;
-    LEASETYPE lease;
     size_t owner_offset;
 } __attribute__((packed));
 
@@ -182,14 +167,15 @@ struct ipc_ns_client {
     char uri[1];
 } __attribute__((packed));
 
-/* CLD_EXIT: thread exit */
+/* CLD_EXIT: process exit */
 struct shim_ipc_cld_exit {
-    IDTYPE ppid, tid;
+    IDTYPE ppid, pid;
+    IDTYPE uid;
     unsigned int exitcode;
     unsigned int term_signal;
 } __attribute__((packed));
 
-int ipc_cld_exit_send(IDTYPE ppid, IDTYPE tid, unsigned int exitcode, unsigned int term_signal);
+int ipc_cld_exit_send(unsigned int exitcode, unsigned int term_signal);
 int ipc_cld_exit_callback(struct shim_ipc_msg* msg, struct shim_ipc_port* port);
 
 /* FINDNS: find namespace leader (its IPC port) */
@@ -211,18 +197,17 @@ struct shim_ipc_lease {
     char uri[1];
 } __attribute__((packed));
 
-int ipc_lease_send(LEASETYPE* lease);
+int ipc_lease_send(void);
 int ipc_lease_callback(struct shim_ipc_msg* msg, struct shim_ipc_port* port);
 
 /* OFFER: offer a range of IDs */
 struct shim_ipc_offer {
     IDTYPE base;
     IDTYPE size;
-    LEASETYPE lease;
 } __attribute__((packed));
 
 int ipc_offer_send(struct shim_ipc_port* port, IDTYPE dest, IDTYPE base, IDTYPE size,
-                   LEASETYPE lease, unsigned long seq);
+                   unsigned long seq);
 int ipc_offer_callback(struct shim_ipc_msg* msg, struct shim_ipc_port* port);
 
 /* RENEW: renew lease of a range of IDs */
@@ -241,7 +226,7 @@ struct shim_ipc_sublease {
     char uri[1];
 } __attribute__((packed));
 
-int ipc_sublease_send(IDTYPE tenant, IDTYPE idx, const char* uri, LEASETYPE* lease);
+int ipc_sublease_send(IDTYPE tenant, IDTYPE idx, const char* uri);
 int ipc_sublease_callback(struct shim_ipc_msg* msg, struct shim_ipc_port* port);
 
 /* QUERY: query the IPC port for a certain ID */
@@ -359,12 +344,11 @@ struct shim_ipc_sysv_movres {
     IDTYPE resid;
     enum sysv_type type;
     IDTYPE owner;
-    LEASETYPE lease;
     char uri[1];
 };
 
-int ipc_sysv_movres_send(struct sysv_client* client, IDTYPE owner, const char* uri, LEASETYPE lease,
-                         IDTYPE resid, enum sysv_type type);
+int ipc_sysv_movres_send(struct sysv_client* client, IDTYPE owner, const char* uri, IDTYPE resid,
+                         enum sysv_type type);
 int ipc_sysv_movres_callback(struct shim_ipc_msg* msg, struct shim_ipc_port* port);
 
 /* SYSV_MSGSND */
@@ -426,17 +410,19 @@ int ipc_sysv_semret_callback(struct shim_ipc_msg* msg, struct shim_ipc_port* por
 /* general-purpose routines */
 int init_ipc(void);
 int init_ipc_helper(void);
+int pause_ipc_helper(void);
+int resume_ipc_helper(void);
 
-struct shim_process* create_process(bool dup_cur_process);
-void free_process(struct shim_process* process);
+struct shim_process_ipc_info* create_process_ipc_info(bool is_execve);
+void free_process_ipc_info(struct shim_process_ipc_info* process);
 
-struct shim_ipc_info* create_ipc_info_cur_process(bool is_self_ipc_info);
+struct shim_ipc_info* create_ipc_info_and_port(bool use_vmid_as_port_name);
 int get_ipc_info_cur_process(struct shim_ipc_info** pinfo);
 
 void add_ipc_port_by_id(IDTYPE vmid, PAL_HANDLE hdl, IDTYPE type, port_fini fini,
                         struct shim_ipc_port** portptr);
 void add_ipc_port(struct shim_ipc_port* port, IDTYPE vmid, IDTYPE type, port_fini fini);
-void del_ipc_port_fini(struct shim_ipc_port* port, unsigned int exitcode);
+void del_ipc_port_fini(struct shim_ipc_port* port);
 struct shim_ipc_port* lookup_ipc_port(IDTYPE vmid, IDTYPE type);
 void get_ipc_port(struct shim_ipc_port* port);
 void put_ipc_port(struct shim_ipc_port* port);
@@ -473,7 +459,7 @@ int send_ipc_message_with_ack(struct shim_ipc_msg_with_ack* msg, struct shim_ipc
                               unsigned long* seq, void* private_data);
 int send_response_ipc_message(struct shim_ipc_port* port, IDTYPE dest, int ret, unsigned long seq);
 
-void ipc_port_with_child_fini(struct shim_ipc_port* port, IDTYPE vmid, unsigned int exitcode);
+void ipc_port_with_child_fini(struct shim_ipc_port* port, IDTYPE vmid);
 
 struct shim_thread* terminate_ipc_helper(void);
 

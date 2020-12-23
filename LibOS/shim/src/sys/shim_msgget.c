@@ -2,9 +2,7 @@
 /* Copyright (C) 2014 Stony Brook University */
 
 /*
- * shim_msgget.c
- *
- * Implementation of system call "msgget", "msgsnd", "msgrcv" and "msgctl".
+ * Implementation of system calls "msgget", "msgsnd", "msgrcv" and "msgctl".
  *
  * XXX(borysp): I'm pretty sure there are possible deadlocks in this code. Sometimes it first takes
  * `msgq_list_lock` and then `hdl->lock`, sometimes other way round. Someone will have to rewrite
@@ -16,13 +14,16 @@
 #include "list.h"
 #include "pal.h"
 #include "pal_error.h"
+#include "perm.h"
 #include "shim_handle.h"
 #include "shim_internal.h"
 #include "shim_ipc.h"
+#include "shim_lock.h"
 #include "shim_sysv.h"
 #include "shim_table.h"
 #include "shim_types.h"
 #include "shim_utils.h"
+#include "stat.h"
 
 #define MSGQ_HASH_LEN  8
 #define MSGQ_HASH_NUM  (1 << MSGQ_HASH_LEN)
@@ -274,7 +275,7 @@ int shim_do_msgget(key_t key, int msgflg) {
         do {
             msgid = allocate_ipc_id(0, 0);
             if (!msgid)
-                ipc_lease_send(NULL);
+                ipc_lease_send();
         } while (!msgid);
 
         if (key != IPC_PRIVATE) {
@@ -614,7 +615,7 @@ int get_sysv_msg(struct shim_msg_handle* msgq, long type, size_t size, void* dat
         if (src) {
             struct shim_ipc_info* owner = msgq->owner;
             ret = owner ? ipc_sysv_movres_send(src, owner->vmid, qstrgetstr(&owner->uri),
-                                               msgq->lease, msgq->msqid, SYSV_MSGQ)
+                                               msgq->msqid, SYSV_MSGQ)
                         : -ECONNREFUSED;
             goto out_locked;
         }
@@ -684,7 +685,7 @@ static int __store_msg_persist(struct shim_msg_handle* msgq) {
     char fileuri[20];
     snprintf(fileuri, 20, URI_PREFIX_FILE "msgq.%08x", msgq->msqid);
 
-    PAL_HANDLE file = DkStreamOpen(fileuri, PAL_ACCESS_RDWR, 0600, PAL_CREATE_TRY, 0);
+    PAL_HANDLE file = DkStreamOpen(fileuri, PAL_ACCESS_RDWR, PERM_rw_______, PAL_CREATE_TRY, 0);
     if (!file) {
         ret = -PAL_ERRNO();
         goto out;

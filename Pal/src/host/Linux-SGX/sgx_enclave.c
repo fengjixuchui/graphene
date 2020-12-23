@@ -1,3 +1,6 @@
+/* SPDX-License-Identifier: LGPL-3.0-or-later */
+/* Copyright (C) 2014 Stony Brook University
+ */
 #include "sgx_enclave.h"
 
 #include <asm/errno.h>
@@ -14,6 +17,7 @@
 
 #include "cpu.h"
 #include "ecall_types.h"
+#include "linux_utils.h"
 #include "ocall_types.h"
 #include "pal_linux_error.h"
 #include "pal_security.h"
@@ -64,6 +68,9 @@ static long sgx_ocall_exit(void* pms) {
     /* exit the whole process if exit_group() */
     if (ms->ms_is_exitgroup) {
         update_and_print_stats(/*process_wide=*/true);
+#ifdef DEBUG
+        sgx_profile_finish();
+#endif
         INLINE_SYSCALL(exit_group, 1, (int)ms->ms_exitcode);
     }
 
@@ -76,6 +83,9 @@ static long sgx_ocall_exit(void* pms) {
     if (!current_enclave_thread_cnt()) {
         /* no enclave threads left, kill the whole process */
         update_and_print_stats(/*process_wide=*/true);
+#ifdef DEBUG
+        sgx_profile_finish();
+#endif
         INLINE_SYSCALL(exit_group, 1, (int)ms->ms_exitcode);
     }
 
@@ -251,7 +261,34 @@ static long sgx_ocall_getdents(void* pms) {
 
 static long sgx_ocall_resume_thread(void* pms) {
     ODEBUG(OCALL_RESUME_THREAD, pms);
-    return interrupt_thread(pms);
+    int tid = get_tid_from_tcs(pms);
+    if (tid < 0)
+        return tid;
+
+    long ret = INLINE_SYSCALL(tgkill, 3, g_pal_enclave.pal_sec.pid, tid, SIGCONT);
+    return ret;
+}
+
+static long sgx_ocall_sched_setaffinity(void* pms) {
+    ms_ocall_sched_setaffinity_t* ms = (ms_ocall_sched_setaffinity_t*)pms;
+    ODEBUG(OCALL_SCHED_SETAFFINITY, ms);
+    int tid = get_tid_from_tcs(ms->ms_tcs);
+    if (tid < 0)
+        return tid;
+
+    long ret = INLINE_SYSCALL(sched_setaffinity, 3, tid, ms->ms_cpumask_size, ms->ms_cpu_mask);
+    return ret;
+}
+
+static long sgx_ocall_sched_getaffinity(void* pms) {
+    ms_ocall_sched_getaffinity_t* ms = (ms_ocall_sched_getaffinity_t*)pms;
+    ODEBUG(OCALL_SCHED_GETAFFINITY, ms);
+    int tid = get_tid_from_tcs(ms->ms_tcs);
+    if (tid < 0)
+        return tid;
+
+    long ret = INLINE_SYSCALL(sched_getaffinity, 3, tid, ms->ms_cpumask_size, ms->ms_cpu_mask);
+    return ret;
 }
 
 static long sgx_ocall_clone_thread(void* pms) {
@@ -261,13 +298,34 @@ static long sgx_ocall_clone_thread(void* pms) {
 }
 
 static long sgx_ocall_create_process(void* pms) {
+    long ret;
+    char* manifest = NULL;
+    char* manifest_path = NULL;
+
     ms_ocall_create_process_t* ms = (ms_ocall_create_process_t*)pms;
     ODEBUG(OCALL_CREATE_PROCESS, ms);
-    long ret = sgx_create_process(ms->ms_uri, ms->ms_nargs, ms->ms_args, &ms->ms_stream_fd);
-    if (ret < 0)
-        return ret;
+
+    /* Temporary solution, will be removed after introduction of centralized manifests. */
+    manifest_path = alloc_concat(ms->ms_uri + URI_PREFIX_FILE_LEN, -1, ".manifest.sgx", -1);
+    if (!manifest_path) {
+        ret = -ENOMEM;
+        goto out;
+    }
+    ret = read_text_file_to_cstr(manifest_path, &manifest);
+    if (ret < 0) {
+        goto out;
+    }
+
+    ret = sgx_create_process(ms->ms_uri, ms->ms_nargs, ms->ms_args, &ms->ms_stream_fd, manifest);
+    if (ret < 0) {
+        goto out;
+    }
     ms->ms_pid = ret;
-    return 0;
+    ret = 0;
+out:
+    free(manifest_path);
+    free(manifest);
+    return ret;
 }
 
 static long sgx_ocall_futex(void* pms) {
@@ -629,18 +687,36 @@ static long sgx_ocall_eventfd(void* pms) {
     return ret;
 }
 
-static long sgx_ocall_load_debug(void* pms) {
-    const char* command = (const char*)pms;
-    ODEBUG(OCALL_LOAD_DEBUG, (void*)command);
-    execute_gdb_command(command);
+static long sgx_ocall_update_debugger(void* pms) {
+    ms_ocall_update_debugger_t* ms = (ms_ocall_update_debugger_t*)pms;
+    ODEBUG(OCALL_UPDATE_DEBUGGER, ms);
+
+#ifdef DEBUG
+    g_pal_enclave.debug_map = ms->ms_debug_map;
+    update_debugger();
+#else
+    __UNUSED(ms);
+#endif
+    return 0;
+}
+
+static long sgx_ocall_report_mmap(void* pms) {
+    ms_ocall_report_mmap_t* ms = (ms_ocall_report_mmap_t*)pms;
+    ODEBUG(OCALL_REPORT_MMAP, ms);
+
+#ifdef DEBUG
+    sgx_profile_report_mmap(ms->ms_filename, ms->ms_addr, ms->ms_len, ms->ms_offset);
+#else
+    __UNUSED(ms);
+#endif
     return 0;
 }
 
 static long sgx_ocall_get_quote(void* pms) {
     ms_ocall_get_quote_t* ms = (ms_ocall_get_quote_t*)pms;
     ODEBUG(OCALL_GET_QUOTE, ms);
-    return retrieve_quote(&ms->ms_spid, ms->ms_linkable, &ms->ms_report, &ms->ms_nonce,
-                          &ms->ms_quote, &ms->ms_quote_len);
+    return retrieve_quote(ms->ms_is_epid ? &ms->ms_spid : NULL, ms->ms_linkable, &ms->ms_report,
+                          &ms->ms_nonce, &ms->ms_quote, &ms->ms_quote_len);
 }
 
 sgx_ocall_fn_t ocall_table[OCALL_NR] = {
@@ -663,6 +739,8 @@ sgx_ocall_fn_t ocall_table[OCALL_NR] = {
     [OCALL_MKDIR]            = sgx_ocall_mkdir,
     [OCALL_GETDENTS]         = sgx_ocall_getdents,
     [OCALL_RESUME_THREAD]    = sgx_ocall_resume_thread,
+    [OCALL_SCHED_SETAFFINITY]= sgx_ocall_sched_setaffinity,
+    [OCALL_SCHED_GETAFFINITY]= sgx_ocall_sched_getaffinity,
     [OCALL_CLONE_THREAD]     = sgx_ocall_clone_thread,
     [OCALL_CREATE_PROCESS]   = sgx_ocall_create_process,
     [OCALL_FUTEX]            = sgx_ocall_futex,
@@ -679,7 +757,8 @@ sgx_ocall_fn_t ocall_table[OCALL_NR] = {
     [OCALL_POLL]             = sgx_ocall_poll,
     [OCALL_RENAME]           = sgx_ocall_rename,
     [OCALL_DELETE]           = sgx_ocall_delete,
-    [OCALL_LOAD_DEBUG]       = sgx_ocall_load_debug,
+    [OCALL_UPDATE_DEBUGGER]  = sgx_ocall_update_debugger,
+    [OCALL_REPORT_MMAP]      = sgx_ocall_report_mmap,
     [OCALL_EVENTFD]          = sgx_ocall_eventfd,
     [OCALL_GET_QUOTE]        = sgx_ocall_get_quote,
 };
@@ -724,7 +803,7 @@ static int rpc_thread_loop(void* arg) {
                 (void)INLINE_SYSCALL(nanosleep, 2, &tv, /*rem=*/NULL);
             } else {
                 spin_attempts++;
-                cpu_pause();
+                CPU_RELAX();
             }
             continue;
         }

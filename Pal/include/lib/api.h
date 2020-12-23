@@ -11,6 +11,7 @@
 
 #include "assert.h"
 #include "list.h"
+#include "toml.h"
 
 /* WARNING: this declaration may conflict with some header files */
 #ifndef ssize_t
@@ -63,6 +64,14 @@ typedef ptrdiff_t ssize_t;
         assert((x) != 0);         \
         (((x) & ((x) - 1)) == 0); \
     })
+
+#define DIV_ROUND_UP(n,d)               (((n) + (d) - 1) / (d))
+
+#define BITS_IN_BYTE                    8
+#define BITS_IN_TYPE(type)              (sizeof(type) * BITS_IN_BYTE)
+#define BITS_TO_LONGS(nr)               DIV_ROUND_UP(nr, BITS_IN_TYPE(long))
+/* Note: This macro is not intended for use when nbits == BITS_IN_TYPE(type) */
+#define SET_HIGHEST_N_BITS(type, nbits) (~(((uint64_t)1 << (BITS_IN_TYPE(type) - (nbits))) - 1))
 
 #define IS_ALIGNED(val, alignment)     ((val) % (alignment) == 0)
 #define ALIGN_DOWN(val, alignment)     ((val) - (val) % (alignment))
@@ -126,36 +135,41 @@ typedef ptrdiff_t ssize_t;
 /* LibC string functions */
 size_t strnlen(const char* str, size_t maxlen);
 size_t strlen(const char* str);
-int strcmp(const char* a, const char* b);
+int strncmp(const char* lhs, const char* rhs, size_t maxlen);
+int strcmp(const char* lhs, const char* rhs);
 
 long strtol(const char* s, char** endptr, int base);
+long long strtoll(const char* s, char** endptr, int base);
 int atoi(const char* nptr);
 long int atol(const char* nptr);
 
+int islower(int c);
+int toupper(int c);
+int isalpha(int c);
+int isdigit(int c);
+int isalnum(int c);
+
 char* strchr(const char* s, int c_in);
 char* strstr(const char* haystack, const char* needle);
+size_t strspn(const char* s, const char* c);
 
 void* memcpy(void* restrict dest, const void* restrict src, size_t count);
 void* memmove(void* dest, const void* src, size_t count);
 void* memset(void* dest, int ch, size_t count);
 int memcmp(const void* lhs, const void* rhs, size_t count);
 
-bool strendswith(const char* haystack, const char* needle);
+bool strstartswith(const char* str, const char* prefix);
+bool strendswith(const char* str, const char* suffix);
+char* strdup(const char* str);
+char* alloc_substr(const char* start, size_t len);
+char* alloc_concat(const char* a, size_t a_len, const char* b, size_t b_len);
+char* alloc_concat3(const char* a, size_t a_len, const char* b, size_t b_len,
+                    const char* c, size_t c_len);
 
 /* Libc memory allocation functions */
 void* malloc(size_t size);
 void free(void* ptr);
 void* calloc(size_t nmemb, size_t size);
-
-/* check if `var` is exactly the same as a static string */
-#define strcmp_static(var, str) \
-    (memcmp(var, str, MIN(strlen(var), static_strlen(str)) + 1))
-
-/* check if `str` starts with a static string */
-#define strstartswith_static(str, prefix)          \
-    (strlen(str) >= static_strlen(prefix)          \
-     ? !memcmp(str, prefix, static_strlen(prefix)) \
-     : false)
 
 /* copy static string and return the address of the NUL byte (NULL if the dest
  * is not large enough).*/
@@ -180,9 +194,7 @@ void* calloc(size_t nmemb, size_t size);
         memcpy(*_d, *_s, sizeof(*_d));                                         \
     } while (0)
 
-#ifdef __x86_64__
 #define COMPILER_BARRIER() ({ __asm__ __volatile__("" ::: "memory"); })
-#endif // __x86_64__
 
 /* Idea taken from: https://elixir.bootlin.com/linux/v5.6/source/include/linux/compiler.h */
 #define READ_ONCE(x)                            \
@@ -230,31 +242,56 @@ extern const char* const* sys_errlist_internal;
 int get_norm_path(const char* path, char* buf, size_t* size);
 int get_base_name(const char* path, char* buf, size_t* size);
 
-/* Loading configs / manifests */
+/*!
+ * \brief Parse a size (number with optional "G"/"M"/"K" suffix) into an unsigned long.
+ *
+ * \param str A string containing a non-negative number. The string may end with "G"/"g" suffix
+ *            denoting value in GBs, "M"/"m" for MBs, or "K"/"k" for KBs.
+ *
+ * By default the number should be decimal, but if it starts with 0x it is parsed as hexadecimal
+ * and if it otherwise starts with 0, it is parsed as octal. Function returns -1 if string cannot
+ * be parsed into a size (e.g., suffix is wrong).
+ */
+int64_t parse_size_str(const char* str);
 
-struct config;
-DEFINE_LISTP(config);
-struct config_store {
-    LISTP_TYPE(config) root;
-    LISTP_TYPE(config) entries;
-    void* raw_data;
-    int raw_size;
-    void* (*malloc)(size_t);
-    void (*free)(void*);
-};
+/*!
+ * \brief Find an integer key-value in TOML manifest.
+ *
+ * \param root       Root table of the TOML manifest.
+ * \param key        Dotted key (e.g. "loader.insecure__use_cmdline_argv").
+ * \param defaultval `retval` is set to this value if not found in the manifest.
+ * \param retval     Pointer to output integer.
+ *
+ * Returns 0 if there were no errors (but value may have not been found in manifest and was set to
+ * default one) or -1 if there were errors during conversion to int.
+ */
+int toml_int_in(const toml_table_t* root, const char* key, int64_t defaultval, int64_t* retval);
 
-int read_config(struct config_store* store, bool (*filter)(const char*, size_t),
-                const char** errstring);
-int free_config(struct config_store* store);
-int copy_config(struct config_store* store, struct config_store* new_store);
-int write_config(void* file, int (*write)(void*, void*, int), struct config_store* store);
-ssize_t get_config(struct config_store* cfg, const char* key, char* val_buf, size_t buf_size);
-int get_config_entries(struct config_store* cfg, const char* key, char* key_buf,
-                       size_t key_bufsize);
-ssize_t get_config_entries_size(struct config_store* cfg, const char* key);
-int set_config(struct config_store* cfg, const char* key, const char* val);
+/*!
+ * \brief Find a string key-value in TOML manifest.
+ *
+ * \param root      Root table of the TOML manifest.
+ * \param key       Dotted key (e.g. "fs.mount.lib1.type").
+ * \param retval    Pointer to output string.
+ *
+ * Returns 0 if there were no errors (but value may have not been found in manifest and was set to
+ * NULL) or -1 if there were errors during conversion to string.
+ */
+int toml_string_in(const toml_table_t* root, const char* key, char** retval);
 
-#define CONFIG_MAX 4096
+/*!
+ * \brief Find a "size" string key-value in TOML manifest (parsed via `parse_size_str()`).
+ *
+ * \param root       Root table of the TOML manifest.
+ * \param key        Dotted key (e.g. "sys.stack.size").
+ * \param defaultval `retval` is set to this value if not found in the manifest.
+ * \param retval     Pointer to output integer.
+ *
+ * Returns 0 if there were no errors (but value may have not been found in manifest and was set to
+ * default one) or -1 if there were errors during conversion to "size" string.
+ */
+int toml_sizestring_in(const toml_table_t* root, const char* key, uint64_t defaultval,
+                       uint64_t* retval);
 
 #define URI_PREFIX_SEPARATOR ":"
 

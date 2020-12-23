@@ -15,7 +15,6 @@
 #include <linux/in.h>
 #include <linux/in6.h>
 #include <linux/sched.h>
-#include <linux/stat.h>
 #include <linux/un.h>
 #include <linux/wait.h>
 
@@ -28,6 +27,8 @@
 #include "shim_tcb.h"
 #include "shim_thread.h"
 #include "shim_utils.h"
+#include "shim_vma.h"
+#include "stat.h"
 
 static void parse_open_flags(va_list*);
 static void parse_open_mode(va_list*);
@@ -41,6 +42,7 @@ static void parse_pipe_fds(va_list*);
 static void parse_signum(va_list*);
 static void parse_sigmask(va_list*);
 static void parse_sigprocmask_how(va_list*);
+static void parse_madvise_behavior(va_list* ap);
 static void parse_timespec(va_list*);
 static void parse_sockaddr(va_list*);
 static void parse_domain(va_list*);
@@ -89,7 +91,7 @@ struct parser_table {
         [__NR_mremap]      = {.slow = 0, .parser = {NULL}},
         [__NR_msync]       = {.slow = 0, .parser = {NULL}},
         [__NR_mincore]     = {.slow = 0, .parser = {NULL}},
-        [__NR_madvise]     = {.slow = 0, .parser = {NULL}},
+        [__NR_madvise]     = {.slow = 0, .parser = {NULL, NULL, &parse_madvise_behavior}},
         [__NR_shmget]      = {.slow = 0, .parser = {NULL}},
         [__NR_shmat]       = {.slow = 0, .parser = {NULL}},
         [__NR_shmctl]      = {.slow = 0, .parser = {NULL}},
@@ -462,8 +464,11 @@ static const char* signal_name(int sig, char str[6]) {
 }
 
 static inline int is_pointer(const char* type) {
-    return type[strlen(type) - 1] == '*' || !strcmp_static(type, "long") ||
-           !strcmp_static(type, "unsigned long");
+    return type[strlen(type) - 1] == '*';
+}
+
+static inline int is_pointer_or_long(const char* type) {
+    return is_pointer(type) || !strcmp(type, "long") || !strcmp(type, "unsigned long");
 }
 
 #define PRINTF(fmt, ...)                \
@@ -477,10 +482,6 @@ static inline int is_pointer(const char* type) {
 #define PUTCH(ch)        \
     do {                 \
         debug_putch(ch); \
-    } while (0)
-#define VPRINTF(fmt, ap)        \
-    do {                        \
-        debug_vprintf(fmt, ap); \
     } while (0)
 
 struct flag_table {
@@ -533,9 +534,9 @@ static inline void parse_integer_arg(va_list* ap) {
 static inline void parse_syscall_args(va_list* ap) {
     const char* arg_type = va_arg(*ap, const char*);
 
-    if (!strcmp_static(arg_type, "const char *") || !strcmp_static(arg_type, "const char*"))
+    if (!strcmp(arg_type, "const char *") || !strcmp(arg_type, "const char*"))
         parse_string_arg(ap);
-    else if (is_pointer(arg_type))
+    else if (is_pointer_or_long(arg_type))
         parse_pointer_arg(ap);
     else
         parse_integer_arg(ap);
@@ -544,23 +545,16 @@ static inline void parse_syscall_args(va_list* ap) {
 static inline void skip_syscall_args(va_list* ap) {
     const char* arg_type = va_arg(*ap, const char*);
 
-    if (!strcmp_static(arg_type, "const char *") || !strcmp_static(arg_type, "const char*"))
+    if (!strcmp(arg_type, "const char *") || !strcmp(arg_type, "const char*"))
         va_arg(*ap, const char*);
-    else if (is_pointer(arg_type))
+    else if (is_pointer_or_long(arg_type))
         va_arg(*ap, void*);
     else
         va_arg(*ap, int);
 }
 
-void sysparser_printf(const char* fmt, ...) {
-    va_list ap;
-    va_start(ap, fmt);
-    VPRINTF(fmt, ap);
-    va_end(ap);
-}
-
 void parse_syscall_before(int sysno, const char* name, int nr, ...) {
-    if (!debug_handle)
+    if (!g_debug_log_enabled)
         return;
 
     struct parser_table* parser = &syscall_parser_table[sysno];
@@ -596,7 +590,7 @@ dotdotdot:
 }
 
 void parse_syscall_after(int sysno, const char* name, int nr, ...) {
-    if (!debug_handle)
+    if (!g_debug_log_enabled)
         return;
 
     struct parser_table* parser = &syscall_parser_table[sysno];
@@ -993,6 +987,72 @@ static void parse_sigprocmask_how(va_list* ap) {
             break;
         default:
             PUTS("<unknown>");
+            break;
+    }
+}
+
+static void parse_madvise_behavior(va_list* ap) {
+    int behavior = va_arg(*ap, int);
+    switch (behavior) {
+        case MADV_DOFORK:
+            PUTS("MADV_DOFORK");
+            break;
+        case MADV_DONTFORK:
+            PUTS("MADV_DONTFORK");
+            break;
+        case MADV_NORMAL:
+            PUTS("MADV_NORMAL");
+            break;
+        case MADV_SEQUENTIAL:
+            PUTS("MADV_SEQUENTIAL");
+            break;
+        case MADV_RANDOM:
+            PUTS("MADV_RANDOM");
+            break;
+        case MADV_REMOVE:
+            PUTS("MADV_REMOVE");
+            break;
+        case MADV_WILLNEED:
+            PUTS("MADV_WILLNEED");
+            break;
+        case MADV_DONTNEED:
+            PUTS("MADV_DONTNEED");
+            break;
+        case MADV_FREE:
+            PUTS("MADV_FREE");
+            break;
+        case MADV_MERGEABLE:
+            PUTS("MADV_MERGEABLE");
+            break;
+        case MADV_UNMERGEABLE:
+            PUTS("MADV_UNMERGEABLE");
+            break;
+        case MADV_HUGEPAGE:
+            PUTS("MADV_HUGEPAGE");
+            break;
+        case MADV_NOHUGEPAGE:
+            PUTS("MADV_NOHUGEPAGE");
+            break;
+        case MADV_DONTDUMP:
+            PUTS("MADV_DONTDUMP");
+            break;
+        case MADV_DODUMP:
+            PUTS("MADV_DODUMP");
+            break;
+        case MADV_WIPEONFORK:
+            PUTS("MADV_WIPEONFORK");
+            break;
+        case MADV_KEEPONFORK:
+            PUTS("MADV_KEEPONFORK");
+            break;
+        case MADV_SOFT_OFFLINE:
+            PUTS("MADV_SOFT_OFFLINE");
+            break;
+        case MADV_HWPOISON:
+            PUTS("MADV_HWPOISON");
+            break;
+        default:
+            PRINTF("(unknown: %d)", behavior);
             break;
     }
 }

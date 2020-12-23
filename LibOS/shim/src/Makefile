@@ -20,18 +20,18 @@ CFLAGS += -Wextra
 
 # Some of the code uses alignof on expressions, which is a GNU extension.
 # Silence Clang - it complains but does support it.
-CFLAGS += -Wno-gnu-alignof-expression
+CFLAGS += $(cc-option,-Wno-gnu-alignof-expression)
 
 # TODO: This is due to use of packed structs in IPC code, which triggers "taking address of a packed
 # member" warning in Clang and newer GCC. That code needs to be rewritten.
 CFLAGS += -Wno-address-of-packed-member
 
-ASFLAGS += -Wa,--noexecstack -x assembler-with-cpp -I../include
+ASFLAGS += -Wa,--noexecstack -x assembler-with-cpp -I../include -I../include/arch/$(ARCH)
 
 LDFLAGS += -shared -nostdlib -z combreloc -z relro -z now -z defs \
 	  -rpath-link=$(abspath $(RUNTIME_DIR))
 
-files_to_build = libsysdb.a libsysdb.so libsysdb_debug.so
+files_to_build = libsysdb.a libsysdb.so
 files_to_install = $(addprefix $(RUNTIME_DIR)/,$(files_to_build))
 
 defs	= -DIN_SHIM
@@ -52,6 +52,7 @@ objs = \
 	start-$(ARCH).o \
 	syscallas-$(ARCH).o \
 	bookkeep/shim_handle.o \
+	bookkeep/shim_process.o \
 	bookkeep/shim_signal.o \
 	bookkeep/shim_thread.o \
 	bookkeep/shim_vma.o \
@@ -99,6 +100,7 @@ objs = \
 	sys/shim_getpid.o \
 	sys/shim_getrandom.o \
 	sys/shim_getrlimit.o \
+	sys/shim_getuid.o \
 	sys/shim_ioctl.o \
 	sys/shim_mmap.o \
 	sys/shim_msgget.o \
@@ -127,6 +129,10 @@ all_objs = \
 graphene_lib = .lib/graphene-lib.a
 pal_lib = $(RUNTIME_DIR)/libpal-$(PAL_HOST).so
 
+ifeq ($(ARCH),x86_64)
+	CFLAGS += -mfxsr -mxsave
+endif
+
 ifeq ($(findstring x86_64,$(SYS))$(findstring linux,$(SYS)),x86_64linux)
 all: $(files_to_build) $(files_to_install)
 else
@@ -136,15 +142,9 @@ endif
 $(files_to_install): $(RUNTIME_DIR)/%: %
 	$(call cmd,ln_sfr)
 
-LDFLAGS-libsysdb.so += --version-script shim.map -T shim-$(ARCH).lds
+LDFLAGS-libsysdb.so += --version-script shim.map -T shim-$(ARCH).lds --eh-frame-hdr
 libsysdb.so: $(objs) $(filter %.map %.lds,$(LDFLAGS-$@)) \
 	     $(graphene_lib) $(pal_lib) shim.map shim-$(ARCH).lds
-	$(call cmd,ld_so_o)
-
-LDFLAGS-libsysdb_debug.so += --version-script shim-debug.map -T shim-$(ARCH).lds
-libsysdb_debug.so: $(filter-out syscallas-$(ARCH).o,$(objs)) \
-		   $(filter %.map %.lds,$(LDFLAGS-$@)) \
-		   $(graphene_lib) $(pal_lib) shim-debug.map shim-$(ARCH).lds
 	$(call cmd,ld_so_o)
 
 .PHONY: graphene_lib_recurse

@@ -2,60 +2,29 @@
 /* Copyright (C) 2014 Stony Brook University */
 
 /*
- * shim_fs.c
- *
- * Implementation of system call "unlink", "unlinkat", "mkdir", "mkdirat",
- * "rmdir", "umask", "chmod", "fchmod", "fchmodat", "rename", "renameat" and
- * "sendfile".
+ * Implementation of system calls "unlink", "unlinkat", "mkdir", "mkdirat", "rmdir", "umask",
+ * "chmod", "fchmod", "fchmodat", "rename", "renameat" and "sendfile".
  */
-
-#define __KERNEL__
 
 #include <asm/mman.h>
 #include <errno.h>
 #include <linux/fcntl.h>
-#include <linux/stat.h>
 
 #include "pal.h"
 #include "pal_error.h"
 #include "shim_fs.h"
 #include "shim_handle.h"
 #include "shim_internal.h"
+#include "shim_lock.h"
+#include "shim_process.h"
 #include "shim_table.h"
-#include "shim_thread.h"
 #include "shim_utils.h"
+#include "stat.h"
 
 /* The kernel would look up the parent directory, and remove the child from the inode. But we are
  * working with the PAL, so we open the file, truncate and close it. */
 int shim_do_unlink(const char* file) {
-    if (!file)
-        return -EINVAL;
-
-    if (test_user_string(file))
-        return -EFAULT;
-
-    struct shim_dentry* dent = NULL;
-    int ret = 0;
-
-    if ((ret = path_lookupat(NULL, file, LOOKUP_OPEN, &dent, NULL)) < 0)
-        return ret;
-
-    if (!dent->parent)
-        return -EACCES;
-
-    if (dent->state & DENTRY_ISDIRECTORY)
-        return -EISDIR;
-
-    if (dent->fs && dent->fs->d_ops && dent->fs->d_ops->unlink) {
-        if ((ret = dent->fs->d_ops->unlink(dent->parent, dent)) < 0)
-            return ret;
-    } else {
-        dent->state |= DENTRY_PERSIST;
-    }
-
-    dent->state |= DENTRY_NEGATIVE;
-    put_dentry(dent);
-    return 0;
+    return shim_do_unlinkat(AT_FDCWD, file, 0);
 }
 
 int shim_do_unlinkat(int dfd, const char* pathname, int flag) {
@@ -72,7 +41,7 @@ int shim_do_unlinkat(int dfd, const char* pathname, int flag) {
     struct shim_dentry* dent = NULL;
     int ret = 0;
 
-    if ((ret = get_dirfd_dentry(dfd, &dir)) < 0)
+    if (*pathname != '/' && (ret = get_dirfd_dentry(dfd, &dir)) < 0)
         return ret;
 
     if ((ret = path_lookupat(dir, pathname, LOOKUP_OPEN, &dent, NULL)) < 0)
@@ -80,20 +49,25 @@ int shim_do_unlinkat(int dfd, const char* pathname, int flag) {
 
     if (!dent->parent) {
         ret = -EACCES;
-        goto out_dent;
+        goto out;
     }
 
     if (flag & AT_REMOVEDIR) {
-        if (!(dent->state & DENTRY_ISDIRECTORY))
-            return -ENOTDIR;
+        if (!(dent->state & DENTRY_ISDIRECTORY)) {
+            ret = -ENOTDIR;
+            goto out;
+        }
     } else {
-        if (dent->state & DENTRY_ISDIRECTORY)
-            return -EISDIR;
+        if (dent->state & DENTRY_ISDIRECTORY) {
+            ret = -EISDIR;
+            goto out;
+        }
     }
 
     if (dent->fs && dent->fs->d_ops && dent->fs->d_ops->unlink) {
-        if ((ret = dent->fs->d_ops->unlink(dent->parent, dent)) < 0)
-            return ret;
+        if ((ret = dent->fs->d_ops->unlink(dent->parent, dent)) < 0) {
+            goto out;
+        }
     } else {
         dent->state |= DENTRY_PERSIST;
     }
@@ -102,15 +76,17 @@ int shim_do_unlinkat(int dfd, const char* pathname, int flag) {
         dent->state &= ~DENTRY_ISDIRECTORY;
 
     dent->state |= DENTRY_NEGATIVE;
-out_dent:
-    put_dentry(dent);
 out:
-    put_dentry(dir);
+    if (dir)
+        put_dentry(dir);
+    if (dent) {
+        put_dentry_maybe_delete(dent);
+    }
     return ret;
 }
 
 int shim_do_mkdir(const char* pathname, int mode) {
-    return open_namei(NULL, NULL, pathname, O_CREAT | O_EXCL | O_DIRECTORY, mode, NULL);
+    return shim_do_mkdirat(AT_FDCWD, pathname, mode);
 }
 
 int shim_do_mkdirat(int dfd, const char* pathname, int mode) {
@@ -123,12 +99,13 @@ int shim_do_mkdirat(int dfd, const char* pathname, int mode) {
     struct shim_dentry* dir = NULL;
     int ret = 0;
 
-    if ((ret = get_dirfd_dentry(dfd, &dir)) < 0)
+    if (*pathname != '/' && (ret = get_dirfd_dentry(dfd, &dir)) < 0)
         return ret;
 
     ret = open_namei(NULL, dir, pathname, O_CREAT | O_EXCL | O_DIRECTORY, mode, NULL);
 
-    put_dentry(dir);
+    if (dir)
+        put_dentry(dir);
     return ret;
 }
 
@@ -170,38 +147,15 @@ out:
 }
 
 mode_t shim_do_umask(mode_t mask) {
-    struct shim_thread* cur = get_cur_thread();
-    lock(&cur->lock);
-    mode_t old = cur->umask;
-    cur->umask = mask & 0777;
-    unlock(&cur->lock);
+    lock(&g_process.fs_lock);
+    mode_t old = g_process.umask;
+    g_process.umask = mask & 0777;
+    unlock(&g_process.fs_lock);
     return old;
 }
 
 int shim_do_chmod(const char* path, mode_t mode) {
-    struct shim_dentry* dent = NULL;
-    int ret = 0;
-
-    /* This isn't documented, but that's what Linux does. */
-    mode &= 07777;
-
-    if (test_user_string(path))
-        return -EFAULT;
-
-    if ((ret = path_lookupat(NULL, path, LOOKUP_OPEN, &dent, NULL)) < 0)
-        return ret;
-
-    if (dent->fs && dent->fs->d_ops && dent->fs->d_ops->chmod) {
-        if ((ret = dent->fs->d_ops->chmod(dent, mode)) < 0)
-            goto out;
-    } else {
-        dent->state |= DENTRY_PERSIST;
-    }
-
-    dent->mode = mode;
-out:
-    put_dentry(dent);
-    return ret;
+    return shim_do_fchmodat(AT_FDCWD, path, mode);
 }
 
 int shim_do_fchmodat(int dfd, const char* filename, mode_t mode) {
@@ -218,7 +172,7 @@ int shim_do_fchmodat(int dfd, const char* filename, mode_t mode) {
     struct shim_dentry* dent = NULL;
     int ret = 0;
 
-    if ((ret = get_dirfd_dentry(dfd, &dir)) < 0)
+    if (*filename != '/' && (ret = get_dirfd_dentry(dfd, &dir)) < 0)
         return ret;
 
     if ((ret = path_lookupat(dir, filename, LOOKUP_OPEN, &dent, NULL)) < 0)
@@ -235,7 +189,8 @@ int shim_do_fchmodat(int dfd, const char* filename, mode_t mode) {
 out_dent:
     put_dentry(dent);
 out:
-    put_dentry(dir);
+    if (dir)
+        put_dentry(dir);
     return ret;
 }
 
@@ -264,23 +219,7 @@ out:
 }
 
 int shim_do_chown(const char* path, uid_t uid, gid_t gid) {
-    struct shim_dentry* dent = NULL;
-    int ret = 0;
-    __UNUSED(uid);
-    __UNUSED(gid);
-
-    if (!path)
-        return -EINVAL;
-
-    if (test_user_string(path))
-        return -EFAULT;
-
-    if ((ret = path_lookupat(NULL, path, LOOKUP_OPEN, &dent, NULL)) < 0)
-        return ret;
-
-    /* XXX: do nothing now */
-    put_dentry(dent);
-    return ret;
+    return shim_do_fchownat(AT_FDCWD, path, uid, gid, 0);
 }
 
 int shim_do_fchownat(int dfd, const char* filename, uid_t uid, gid_t gid, int flags) {
@@ -298,7 +237,7 @@ int shim_do_fchownat(int dfd, const char* filename, uid_t uid, gid_t gid, int fl
     struct shim_dentry* dent = NULL;
     int ret = 0;
 
-    if ((ret = get_dirfd_dentry(dfd, &dir)) < 0)
+    if (*filename != '/' && (ret = get_dirfd_dentry(dfd, &dir)) < 0)
         return ret;
 
     if ((ret = path_lookupat(dir, filename, LOOKUP_OPEN, &dent, NULL)) < 0)
@@ -307,7 +246,8 @@ int shim_do_fchownat(int dfd, const char* filename, uid_t uid, gid_t gid, int fl
     /* XXX: do nothing now */
     put_dentry(dent);
 out:
-    put_dentry(dir);
+    if (dir)
+        put_dentry(dir);
     return ret;
 }
 
@@ -623,7 +563,7 @@ int shim_do_renameat(int olddirfd, const char* oldpath, int newdirfd, const char
         return -EFAULT;
     }
 
-    if ((ret = get_dirfd_dentry(olddirfd, &old_dir_dent)) < 0) {
+    if (*oldpath != '/' && (ret = get_dirfd_dentry(olddirfd, &old_dir_dent)) < 0) {
         goto out;
     }
 
@@ -636,7 +576,7 @@ int shim_do_renameat(int olddirfd, const char* oldpath, int newdirfd, const char
         goto out;
     }
 
-    if ((ret = get_dirfd_dentry(newdirfd, &new_dir_dent)) < 0) {
+    if (*newpath != '/' && (ret = get_dirfd_dentry(newdirfd, &new_dir_dent)) < 0) {
         goto out;
     }
 
@@ -669,13 +609,23 @@ out:
 
 ssize_t shim_do_sendfile(int ofd, int ifd, off_t* offset, size_t count) {
     struct shim_handle* hdli = get_fd_handle(ifd, NULL, NULL);
-    struct shim_handle* hdlo = get_fd_handle(ofd, NULL, NULL);
-
-    if (!hdli || !hdlo)
+    if (!hdli)
         return -EBADF;
 
+    struct shim_handle* hdlo = get_fd_handle(ofd, NULL, NULL);
+    if (!hdlo) {
+        put_handle(hdli);
+        return -EBADF;
+    }
+
+    int ret = -EINVAL;
+    if (hdlo->flags & O_APPEND) {
+        /* Linux errors out if output fd has the O_APPEND flag set; comply with this behavior */
+        goto out;
+    }
+
     off_t old_offset = 0;
-    int ret = -EACCES;
+    ret = -EACCES;
 
     if (offset) {
         if (!hdli->fs || !hdli->fs->fs_ops || !hdli->fs->fs_ops->seek)
@@ -710,11 +660,10 @@ int shim_do_chroot(const char* filename) {
         goto out;
     }
 
-    struct shim_thread* thread = get_cur_thread();
-    lock(&thread->lock);
-    put_dentry(thread->root);
-    thread->root = dent;
-    unlock(&thread->lock);
+    lock(&g_process.fs_lock);
+    put_dentry(g_process.root);
+    g_process.root = dent;
+    unlock(&g_process.fs_lock);
 out:
     return ret;
 }

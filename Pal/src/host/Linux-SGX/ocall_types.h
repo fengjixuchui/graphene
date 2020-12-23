@@ -10,6 +10,7 @@
 #include "pal.h"
 #include "sgx_arch.h"
 #include "sgx_attest.h"
+#include "sgx_rtld.h"
 
 /*
  * GCC's structure padding may cause leaking from uninialized
@@ -41,6 +42,8 @@ enum {
     OCALL_MKDIR,
     OCALL_GETDENTS,
     OCALL_RESUME_THREAD,
+    OCALL_SCHED_SETAFFINITY,
+    OCALL_SCHED_GETAFFINITY,
     OCALL_CLONE_THREAD,
     OCALL_CREATE_PROCESS,
     OCALL_FUTEX,
@@ -57,7 +60,8 @@ enum {
     OCALL_POLL,
     OCALL_RENAME,
     OCALL_DELETE,
-    OCALL_LOAD_DEBUG,
+    OCALL_UPDATE_DEBUGGER,
+    OCALL_REPORT_MMAP,
     OCALL_EVENTFD,
     OCALL_GET_QUOTE,
     OCALL_NR,
@@ -166,9 +170,21 @@ typedef struct {
     unsigned int ms_pid;
     const char* ms_uri;
     int ms_stream_fd;
-    int ms_nargs;
+    size_t ms_nargs;
     const char* ms_args[];
 } ms_ocall_create_process_t;
+
+typedef struct {
+    void* ms_tcs;
+    size_t ms_cpumask_size;
+    void* ms_cpu_mask;
+} ms_ocall_sched_setaffinity_t;
+
+typedef struct {
+    void* ms_tcs;
+    size_t ms_cpumask_size;
+    void* ms_cpu_mask;
+} ms_ocall_sched_getaffinity_t;
 
 typedef struct {
     uint32_t* ms_futex;
@@ -267,11 +283,23 @@ typedef struct {
 } ms_ocall_delete_t;
 
 typedef struct {
+    struct debug_map* _Atomic* ms_debug_map;
+} ms_ocall_update_debugger_t;
+
+typedef struct {
+    const char* ms_filename;
+    uint64_t ms_addr;
+    uint64_t ms_len;
+    uint64_t ms_offset;
+} ms_ocall_report_mmap_t;
+
+typedef struct {
     unsigned int ms_initval;
     int          ms_flags;
 } ms_ocall_eventfd_t;
 
 typedef struct {
+    bool              ms_is_epid;
     sgx_spid_t        ms_spid;
     bool              ms_linkable;
     sgx_report_t      ms_report;

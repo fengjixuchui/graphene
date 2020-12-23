@@ -2,14 +2,13 @@
 /* Copyright (C) 2014 Stony Brook University */
 
 /*
- * shim_async.c
- *
  * This file contains functions to add asyncronous events triggered by timer.
  */
 
 #include "list.h"
 #include "pal.h"
 #include "shim_internal.h"
+#include "shim_lock.h"
 #include "shim_thread.h"
 #include "shim_utils.h"
 
@@ -20,6 +19,7 @@ DEFINE_LIST(async_event);
 struct async_event {
     IDTYPE caller; /* thread installing this event */
     LIST_TYPE(async_event) list;
+    LIST_TYPE(async_event) triggered_list;
     void (*callback)(IDTYPE caller, void* arg);
     void* arg;
     PAL_HANDLE object;    /* handle (async IO) to wait on */
@@ -127,7 +127,10 @@ int init_async(void) {
     if (!create_lock(&async_helper_lock)) {
         return -ENOMEM;
     }
-    create_event(&install_new_event);
+    int ret = create_event(&install_new_event);
+    if (ret < 0) {
+        return ret;
+    }
 
     /* enable locking mechanisms since we are going in multi-threaded mode */
     enable_locking();
@@ -145,7 +148,7 @@ static void shim_async_helper(void* arg) {
     update_fs_base(0);
 
     struct debug_buf debug_buf;
-    debug_setbuf(shim_get_tcb(), &debug_buf);
+    (void)debug_setbuf(shim_get_tcb(), &debug_buf);
 
     lock(&async_helper_lock);
     bool notme = (self != async_helper_thread);
@@ -308,7 +311,7 @@ static void shim_async_helper(void* arg) {
                 LISTP_FOR_EACH_ENTRY_SAFE(tmp, n, &async_list, list) {
                     if (tmp->object == pals[i]) {
                         debug("Async IO event triggered at %lu\n", now);
-                        LISTP_ADD_TAIL(tmp, &triggered, list);
+                        LISTP_ADD_TAIL(tmp, &triggered, triggered_list);
                         break;
                     }
                 }
@@ -320,11 +323,11 @@ static void shim_async_helper(void* arg) {
             if (tmp->callback == &cleanup_thread) {
                 debug("Thread exited, cleaning up\n");
                 LISTP_DEL(tmp, &async_list, list);
-                LISTP_ADD_TAIL(tmp, &triggered, list);
+                LISTP_ADD_TAIL(tmp, &triggered, triggered_list);
             } else if (tmp->expire_time && tmp->expire_time <= now) {
                 debug("Alarm/timer triggered at %lu (expired at %lu)\n", now, tmp->expire_time);
                 LISTP_DEL(tmp, &async_list, list);
-                LISTP_ADD_TAIL(tmp, &triggered, list);
+                LISTP_ADD_TAIL(tmp, &triggered, triggered_list);
             }
         }
 
@@ -332,8 +335,8 @@ static void shim_async_helper(void* arg) {
 
         /* call callbacks for all triggered events */
         if (!LISTP_EMPTY(&triggered)) {
-            LISTP_FOR_EACH_ENTRY_SAFE(tmp, n, &triggered, list) {
-                LISTP_DEL(tmp, &triggered, list);
+            LISTP_FOR_EACH_ENTRY_SAFE(tmp, n, &triggered, triggered_list) {
+                LISTP_DEL(tmp, &triggered, triggered_list);
                 tmp->callback(tmp->caller, tmp->arg);
                 if (!tmp->object) {
                     /* this is a one-off exit-child or alarm/timer event */
@@ -375,7 +378,7 @@ static int create_async_helper(void) {
     async_helper_thread = new;
     async_helper_state  = HELPER_ALIVE;
 
-    PAL_HANDLE handle = thread_create(shim_async_helper, new);
+    PAL_HANDLE handle = DkThreadCreate(shim_async_helper, new);
 
     if (!handle) {
         async_helper_thread = NULL;

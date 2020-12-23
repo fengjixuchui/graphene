@@ -69,12 +69,12 @@ R-trusted-libs: R-deps
 	for F in `cat R-deps`; do \
 		P=`ldd $$R_LIBS | grep $$F | awk '{print $$3; exit}'`; \
 		N=`echo $$F | tr --delete '.' | tr --delete '-' | tr --delete '+'`; \
-		echo -n "sgx.trusted_files.$$N = file:$$P\\\\n"; \
+		echo -n "sgx.trusted_files.$$N = \\\"file:$$P\\\"\\\\n"; \
 	done > $@
 
 # R manifests:
 #   For each dependency, generate a rule as follows:
-#       sgx.trusted_files.xxxx = file:xxxx
+#       sgx.trusted_files.xxxx = "file:xxxx"
 
 R.manifest: R.manifest.template R-trusted-libs
 	sed -e 's|$$(GRAPHENEDIR)|'"$(GRAPHENEDIR)"'|g' \
@@ -119,7 +119,7 @@ pal_loader:
 
 .PHONY: check
 check: all
-	./pal_loader R.manifest --slave --vanilla -f scripts/sample.r > OUTPUT 2> /dev/null
+	./pal_loader ./R --slave --vanilla -f scripts/sample.r > OUTPUT 2> /dev/null
 	@grep -q "success" OUTPUT && echo "[ Success 1/1 ]"
 	@$(RM) OUTPUT
 

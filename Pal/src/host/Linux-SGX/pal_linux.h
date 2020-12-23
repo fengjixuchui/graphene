@@ -23,10 +23,11 @@
 #include "sysdep-arch.h"
 #include "uthash.h"
 
-#define IS_ERR   INTERNAL_SYSCALL_ERROR
-#define IS_ERR_P INTERNAL_SYSCALL_ERROR_P
-#define ERRNO    INTERNAL_SYSCALL_ERRNO
-#define ERRNO_P  INTERNAL_SYSCALL_ERRNO_P
+#define IS_ERR      INTERNAL_SYSCALL_ERROR
+#define IS_ERR_P    INTERNAL_SYSCALL_ERROR_P
+#define ERRNO       INTERNAL_SYSCALL_ERRNO
+#define ERRNO_P     INTERNAL_SYSCALL_ERRNO_P
+#define IS_UNIX_ERR INTERNAL_SYSCALL_ERRNO_RANGE
 
 extern struct pal_linux_state {
     PAL_NUM parent_process_id;
@@ -57,6 +58,7 @@ bool stataccess(struct stat* stats, int acc);
 int init_child_process(PAL_HANDLE* parent);
 
 #ifdef IN_ENCLAVE
+extern size_t g_pal_internal_mem_size;
 
 struct pal_sec;
 noreturn void pal_linux_main(char* uptr_libpal_uri, size_t libpal_uri_len, char* uptr_args,
@@ -285,7 +287,8 @@ int _DkStreamSecureSave(LIB_SSL_CONTEXT* ssl_ctx, const uint8_t** obuf, size_t* 
 
 #else
 
-int sgx_create_process(const char* uri, int nargs, const char** args, int* stream_fd);
+int sgx_create_process(const char* uri, size_t nargs, const char** args, int* stream_fd,
+                       const char* manifest);
 
 #ifdef DEBUG
 #ifndef SIGCHLD

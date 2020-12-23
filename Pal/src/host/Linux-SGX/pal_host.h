@@ -2,8 +2,6 @@
 /* Copyright (C) 2014 Stony Brook University */
 
 /*
- * pal_host.h
- *
  * This file contains definition of PAL host ABI.
  */
 
@@ -110,10 +108,8 @@ typedef struct pal_handle {
         } eventfd;
 
         struct {
-            PAL_IDX fd_in, fd_out;
-            PAL_IDX dev_type;
-            PAL_BOL destroy;
-            PAL_STR realpath;
+            PAL_IDX fd;
+            PAL_BOL nonblocking;
         } dev;
 
         struct {
@@ -144,6 +140,7 @@ typedef struct pal_handle {
             PAL_IDX stream;
             PAL_IDX pid;
             PAL_BOL nonblocking;
+            PAL_BOL is_server;
             PAL_SESSION_KEY session_key;
             void* ssl_ctx;
         } process;

@@ -2,9 +2,7 @@
 /* Copyright (C) 2014 Stony Brook University */
 
 /*
- * db_threading.c
- *
- * This file contain APIs to create, exit and yield a thread.
+ * This file contains APIs to create, exit and yield a thread.
  */
 
 #include <stddef.h> /* linux/signal.h misses this dependency (for size_t), at least on Ubuntu 16.04.
@@ -254,21 +252,22 @@ noreturn void _DkThreadExit(int* clear_child_tid) {
     static_assert(sizeof(*clear_child_tid) == 4, "unexpected clear_child_tid size");
 
     __asm__ volatile(
-        "movl $0, (%%rdx) \n\t"   /* spinlock_unlock(&g_thread_stack_lock) */
-        "cmpq $0, %%rbx \n\t"     /* check if clear_child_tid != NULL */
-        "je 1f \n\t"
-        "movl $0, (%%rbx) \n\t"   /* set *clear_child_tid = 0 */
-        "1: \n\t"
-        "syscall \n\t"            /* rdi arg is already prepared, call exit */
-        :                         /* no output regs since we don't return from exit */
-        : "a"(__NR_exit), "D"(0), /* rdi = exit status == 0 */
-          "d"(&g_thread_stack_lock.lock), "b"(clear_child_tid)
-        : "cc", "rcx", "r11", "memory" /* syscall instr clobbers cc, rcx, and r11 */
+        "movl $0, (%[lock]) \n"             /* spinlock_unlock(&g_thread_stack_lock) */
+        "cmpq $0, %[clear_child_tid] \n"    /* check if clear_child_tid != NULL */
+        "je 1f \n"
+        "movl $0, (%[clear_child_tid]) \n"  /* set *clear_child_tid = 0 */
+        "1: \n"
+        "mov %[nr_exit], %%rax\n"
+        "mov %[exit_code], %%edi\n"
+        "syscall \n"
+        "ud2 \n"
+        "jmp 1b \n"
+        :
+        : [nr_exit] "i" (__NR_exit), [exit_code] "i" (0),
+          [lock] "r" (&g_thread_stack_lock.lock), [clear_child_tid] "r" (clear_child_tid)
+        : "memory"
     );
-
-    while (true) {
-        /* nothing */
-    }
+    __builtin_unreachable();
 }
 
 int _DkThreadResume(PAL_HANDLE threadHandle) {
@@ -278,6 +277,18 @@ int _DkThreadResume(PAL_HANDLE threadHandle) {
         return -PAL_ERROR_DENIED;
 
     return 0;
+}
+
+int _DkThreadSetCpuAffinity(PAL_HANDLE thread, PAL_NUM cpumask_size, PAL_PTR cpu_mask) {
+    int ret = INLINE_SYSCALL(sched_setaffinity, 3, thread->thread.tid, cpumask_size, cpu_mask);
+
+    return IS_ERR(ret) ? unix_to_pal_error(ERRNO(ret)) : ret;
+}
+
+int _DkThreadGetCpuAffinity(PAL_HANDLE thread, PAL_NUM cpumask_size, PAL_PTR cpu_mask) {
+    int ret = INLINE_SYSCALL(sched_getaffinity, 3, thread->thread.tid, cpumask_size, cpu_mask);
+
+    return IS_ERR(ret) ? unix_to_pal_error(ERRNO(ret)) : ret;
 }
 
 struct handle_ops g_thread_ops = {

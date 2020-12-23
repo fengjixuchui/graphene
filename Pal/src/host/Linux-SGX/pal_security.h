@@ -28,16 +28,15 @@ struct pal_sec {
     PAL_PTR     exec_addr;
     PAL_NUM     exec_size;
 
-    PAL_SEC_STR manifest_name;
-
     /* child's stream FD created and sent over by parent */
     PAL_IDX stream_fd;
 
     /* additional information */
     PAL_SEC_STR pipe_prefix;
 
-    /* Need to pass in the number of cores */
-    PAL_NUM num_cpus;
+    PAL_NUM online_logical_cores;
+    PAL_NUM physical_cores_per_socket;
+    int* cpu_socket;
 
 #ifdef DEBUG
     PAL_BOL in_gdb;

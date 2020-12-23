@@ -5,9 +5,9 @@
 #define PAL_LINUX_H
 
 #include <asm/fcntl.h>
+#include <asm/stat.h>
 #include <linux/mman.h>
 #include <sigset.h>
-#include <sys/stat.h>
 #include <sys/syscall.h>
 #include <sys/types.h>
 #include <unistd.h>
@@ -18,6 +18,7 @@
 #include "pal_internal.h"
 #include "pal_linux_defs.h"
 #include "pal_linux_error.h"
+#include "stat.h"
 #include "sysdep-arch.h"
 
 #define IS_ERR   INTERNAL_SYSCALL_ERROR
@@ -124,9 +125,9 @@ int handle_deserialize(PAL_HANDLE* handle, const void* data, int size);
 bool stataccess(struct stat* stats, int acc);
 
 void init_child_process(int parent_pipe_fd, PAL_HANDLE* parent, PAL_HANDLE* exec,
-                        PAL_HANDLE* manifest);
+                        char** manifest_out);
 
-int get_cpu_count(void);
+int get_hw_resource(const char* filename, bool count);
 ssize_t read_file_buffer(const char* filename, char* buf, size_t buf_size);
 
 void cpuid(unsigned int leaf, unsigned int subleaf, unsigned int words[]);

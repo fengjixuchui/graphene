@@ -2,8 +2,6 @@
 /* Copyright (C) 2014 Stony Brook University */
 
 /*
- * shim_pipe.c
- *
  * Implementation of system calls "pipe", "pipe2", "socketpair", "mknod", and "mknodat".
  */
 
@@ -12,6 +10,7 @@
 
 #include "pal.h"
 #include "pal_error.h"
+#include "perm.h"
 #include "shim_flags_conv.h"
 #include "shim_fs.h"
 #include "shim_handle.h"
@@ -19,6 +18,7 @@
 #include "shim_table.h"
 #include "shim_types.h"
 #include "shim_utils.h"
+#include "stat.h"
 
 static int create_pipes(struct shim_handle* srv, struct shim_handle* cli, int flags, char* name,
                         struct shim_qstr* qstr) {
@@ -251,7 +251,7 @@ int shim_do_mknodat(int dirfd, const char* pathname, mode_t mode, dev_t dev) {
         /* FIXME: Graphene assumes that file is at least readable by owner, in particular, see
          *        unlink() emulation that uses DkStreamOpen(). We change empty mode to readable
          *        by user here to allow a consequent unlink. Was detected on LTP mknod tests. */
-        int fd = shim_do_openat(dirfd, pathname, O_CREAT | O_EXCL, mode ?: S_IRUSR);
+        int fd = shim_do_openat(dirfd, pathname, O_CREAT | O_EXCL, mode ?: PERM_r________);
         if (fd < 0)
             return fd;
         return shim_do_close(fd);
@@ -276,10 +276,8 @@ int shim_do_mknodat(int dirfd, const char* pathname, mode_t mode, dev_t dev) {
     struct shim_dentry* dir  = NULL;
     struct shim_dentry* dent = NULL;
 
-    ret = get_dirfd_dentry(dirfd, &dir);
-    if (ret < 0) {
+    if (*pathname != '/' && (ret = get_dirfd_dentry(dirfd, &dir)) < 0)
         goto out;
-    }
 
     ret = path_lookupat(dir, pathname, LOOKUP_CREATE, &dent, NULL);
     if (ret < 0 && ret != -ENOENT) {

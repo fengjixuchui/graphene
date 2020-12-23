@@ -4,8 +4,6 @@
  */
 
 /*
- * shim_brk.c
- *
  * Implementation of system call "brk".
  */
 
@@ -14,9 +12,11 @@
 #include "pal.h"
 #include "shim_checkpoint.h"
 #include "shim_internal.h"
+#include "shim_lock.h"
 #include "shim_table.h"
 #include "shim_utils.h"
 #include "shim_vma.h"
+#include "toml.h"
 
 static struct {
     size_t data_segment_size;
@@ -28,6 +28,8 @@ static struct {
 static struct shim_lock brk_lock = {.lock = NULL};
 
 int init_brk_region(void* brk_start, size_t data_segment_size) {
+    int ret;
+
     if (!create_lock(&brk_lock)) {
         debug("Creating brk_lock failed!\n");
         return -ENOMEM;
@@ -39,13 +41,15 @@ int init_brk_region(void* brk_start, size_t data_segment_size) {
         return 0;
     }
 
-    size_t brk_max_size = DEFAULT_BRK_MAX_SIZE;
     data_segment_size = ALLOC_ALIGN_UP(data_segment_size);
 
-    if (root_config) {
-        char brk_cfg[CONFIG_MAX];
-        if (get_config(root_config, "sys.brk.max_size", brk_cfg, sizeof(brk_cfg)) > 0)
-            brk_max_size = parse_int(brk_cfg);
+    assert(g_manifest_root);
+    size_t brk_max_size;
+    ret = toml_sizestring_in(g_manifest_root, "sys.brk.max_size", DEFAULT_BRK_MAX_SIZE,
+                             &brk_max_size);
+    if (ret < 0) {
+        debug("Cannot parse \'sys.brk.max_size\' (the value must be put in double quotes!)\n");
+        return -EINVAL;
     }
 
     if (brk_start && !IS_ALLOC_ALIGNED_PTR(brk_start)) {

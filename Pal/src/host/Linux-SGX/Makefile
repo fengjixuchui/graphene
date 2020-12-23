@@ -19,7 +19,7 @@ CFLAGS += \
 
 # Some of the code uses alignof on expressions, which is a GNU extension.
 # Silence Clang - it complains but does support it.
-CFLAGS += -Wno-gnu-alignof-expression
+CFLAGS += $(cc-option,-Wno-gnu-alignof-expression)
 
 ASFLAGS += \
 	-I. \
@@ -34,7 +34,7 @@ CFLAGS += $(defs)
 ASFLAGS += $(defs)
 
 commons_objs_encl = bogomips.o
-commons_objs_urts = main_exec_path.o
+commons_objs_urts = file_utils.o main_exec_path.o
 
 enclave-objs = \
 	db_devices.o \
@@ -75,8 +75,10 @@ urts-objs = \
 	sgx_framework.o \
 	sgx_graphene.o \
 	sgx_main.o \
+	sgx_perf_data.o \
 	sgx_platform.o \
 	sgx_process.o \
+	sgx_profile.o \
 	sgx_gdb_info.o \
 	sgx_thread.o \
 	quote/aesm.pb-c.o \

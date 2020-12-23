@@ -86,13 +86,11 @@ void append_r_debug(const char* uri, void* addr, void* dyn_addr) {
     if (!new)
         return;
 
-    int uri_len   = strlen(uri);
-    char* new_uri = malloc(uri_len + 1);
+    char* new_uri = strdup(uri);
     if (!new_uri) {
         free(new);
         return;
     }
-    memcpy(new_uri, uri, uri_len + 1);
 
     new->l_addr = addr;
     new->l_ld   = dyn_addr;
@@ -126,7 +124,7 @@ BEGIN_CP_FUNC(gdb_map) {
         size_t off = ADD_CP_OFFSET(sizeof(struct gdb_link_map));
         newm       = (struct gdb_link_map*)(base + off);
 
-        memcpy(newm, m, sizeof(struct gdb_link_map));
+        *newm = *m;
         newm->l_prev = newm->l_next = NULL;
 
         size_t len   = strlen(newm->l_name);

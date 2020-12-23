@@ -1,10 +1,6 @@
 /* SPDX-License-Identifier: LGPL-3.0-or-later */
 /* Copyright (C) 2014 Stony Brook University */
 
-/*
- * shim_utils.h
- */
-
 #ifndef _SHIM_UTILS_H_
 #define _SHIM_UTILS_H_
 
@@ -13,10 +9,9 @@
 #include "pal.h"
 #include "shim_handle.h"
 #include "shim_internal.h"
+#include "toml.h"
 
 struct shim_handle;
-
-void sysparser_printf(const char* fmt, ...);
 
 /* quick hash function based on Robert Jenkins' hash algorithm */
 static inline uint64_t hash64(uint64_t key) {
@@ -145,9 +140,6 @@ void* malloc(size_t size);
 void free(void* mem);
 void* malloc_copy(const void* mem, size_t size);
 
-/* prompt user for confirmation */
-int message_confirm(const char* message, const char* options);
-
 /* ELF binary loading */
 int check_elf_object(struct shim_handle* file);
 int load_elf_object(struct shim_handle* file, void* addr, size_t mapped);
@@ -164,9 +156,6 @@ void clean_link_map_list(void);
 /* create unique files/pipes */
 int create_pipe(char* name, char* uri, size_t size, PAL_HANDLE* hdl, struct shim_qstr* qstr,
                 bool use_vmid_for_name);
-int create_dir(const char* prefix, char* path, size_t size, struct shim_handle** hdl);
-int create_file(const char* prefix, char* path, size_t size, struct shim_handle** hdl);
-int create_handle(const char* prefix, char* path, size_t size, PAL_HANDLE* hdl, unsigned int* id);
 
 /* Asynchronous event support */
 int init_async(void);
@@ -174,6 +163,6 @@ int64_t install_async_event(PAL_HANDLE object, unsigned long time,
                             void (*callback)(IDTYPE caller, void* arg), void* arg);
 struct shim_thread* terminate_async_helper(void);
 
-extern struct config_store* root_config;
+extern toml_table_t* g_manifest_root;
 
 #endif /* _SHIM_UTILS_H */

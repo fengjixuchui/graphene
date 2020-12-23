@@ -1,12 +1,22 @@
+/* SPDX-License-Identifier: LGPL-3.0-or-later */
+/* Copyright (C) 2014 Stony Brook University
+ * Copyright (C) 2020 Intel Corporation
+ *                    Michał Kowalczyk <mkow@invisiblethingslab.com>
+ * Copyright (C) 2020 Invisible Things Lab
+ *                    Michał Kowalczyk <mkow@invisiblethingslab.com>
+ */
+
 /* FIXME: Sorting+re-grouping includes here causes tons of
  * "../../../include/sysdeps/generic/ldsodefs.h:30:32: error: unknown type name ‘Elf__ELF_NATIVE_CLASS_Addr’
  *   #define ElfW(type)       _ElfW(Elf, __ELF_NATIVE_CLASS, type)"
  * errors.
  */
+#include "pal_internal-arch.h"
 #include "pal_linux.h"
 #include "pal_linux_error.h"
 #include "pal_rtld.h"
 #include "hex.h"
+#include "toml.h"
 
 #include "gdb_integration/sgx_gdb.h"
 #include "linux_utils.h"
@@ -35,85 +45,26 @@ char* g_libpal_path = NULL;
 
 struct pal_enclave g_pal_enclave;
 
-static inline char* alloc_concat(const char* p, size_t plen, const char* s, size_t slen) {
-    plen = (plen != (size_t)-1) ? plen : (p ? strlen(p) : 0);
-    slen = (slen != (size_t)-1) ? slen : (s ? strlen(s) : 0);
-
-    char* buf = malloc(plen + slen + 1);
-    if (!buf)
-        return NULL;
-
-    if (plen)
-        memcpy(buf, p, plen);
-    if (slen)
-        memcpy(buf + plen, s, slen);
-
-    buf[plen + slen] = '\0';
-    return buf;
-}
-
-static unsigned long parse_int (const char * str)
-{
-    unsigned long num = 0;
-    int radix = 10;
-    char c;
-
-    if (str[0] == '0') {
-        str++;
-        radix = 8;
-        if (str[0] == 'x') {
-            str++;
-            radix = 16;
-        }
-    }
-
-    while ((c = *(str++))) {
-        int8_t val = hex2dec(c);
-        if (val < 0)
-            break;
-        if ((uint8_t) val >= radix)
-            break;
-        num = num * radix + (uint8_t) val;
-    }
-
-    if (c == 'G' || c == 'g')
-        num *= 1024 * 1024 * 1024;
-    else if (c == 'M' || c == 'm')
-        num *= 1024 * 1024;
-    else if (c == 'K' || c == 'k')
-        num *= 1024;
-
-    return num;
-}
-
-static char* resolve_uri(const char* uri, const char** errstring) {
-    if (!strstartswith_static(uri, URI_PREFIX_FILE)) {
-        *errstring = "Invalid URI";
-        return NULL;
-    }
-
-    char path_buf[URI_MAX];
-    size_t len = URI_MAX;
-    int ret = get_norm_path(uri + 5, path_buf, &len);
-    if (ret < 0) {
-        *errstring = "Invalid URI";
-        return NULL;
-    }
-
-    return alloc_concat(URI_PREFIX_FILE, URI_PREFIX_FILE_LEN, path_buf, len);
-}
+/*
+ * FIXME: the ELF-parsing functions in this file (scan_enclave_binary, report_mmaps,
+ * load_enclave_binary) assume that all the program headers will be found within first FILEBUF_SIZE
+ * bytes. This will be true for most binaries, but is not guaranteed.
+ *
+ * (Glibc also allocates such a buffer but recovers when it's too small, see elf/dl-load.c in glibc
+ * sources.)
+ */
 
 static int scan_enclave_binary(int fd, unsigned long* base, unsigned long* size,
                                unsigned long* entry) {
     int ret = 0;
 
     if (IS_ERR(ret = INLINE_SYSCALL(lseek, 3, fd, 0, SEEK_SET)))
-        return -ERRNO(ret);
+        return ret;
 
     char filebuf[FILEBUF_SIZE];
     ret = INLINE_SYSCALL(read, 3, fd, filebuf, FILEBUF_SIZE);
     if (IS_ERR(ret))
-        return -ERRNO(ret);
+        return ret;
 
     if ((size_t)ret < sizeof(ElfW(Ehdr)))
         return -ENOEXEC;
@@ -147,17 +98,48 @@ static int scan_enclave_binary(int fd, unsigned long* base, unsigned long* size,
     return 0;
 }
 
+#ifdef DEBUG
+static int report_mmaps(int fd, const char* filename, uint64_t base) {
+    int ret = 0;
+
+    if (IS_ERR(ret = INLINE_SYSCALL(lseek, 3, fd, 0, SEEK_SET)))
+        return ret;
+
+    char filebuf[FILEBUF_SIZE];
+    ret = INLINE_SYSCALL(read, 3, fd, filebuf, FILEBUF_SIZE);
+    if (IS_ERR(ret))
+        return ret;
+
+    if ((size_t)ret < sizeof(ElfW(Ehdr)))
+        return -ENOEXEC;
+
+    const ElfW(Ehdr)* header = (void*)filebuf;
+    const ElfW(Phdr)* phdr   = (void*)filebuf + header->e_phoff;
+    const ElfW(Phdr)* ph;
+
+    for (ph = phdr; ph < &phdr[header->e_phnum]; ph++)
+        if (ph->p_type == PT_LOAD && ph->p_flags & PF_X) {
+            uint64_t mapstart  = ALLOC_ALIGN_DOWN(ph->p_vaddr);
+            uint64_t mapend = ALLOC_ALIGN_UP(ph->p_vaddr + ph->p_filesz);
+            uint64_t mapoff = ALLOC_ALIGN_DOWN(ph->p_offset);
+            sgx_profile_report_mmap(filename, base + mapstart, mapend - mapstart, mapoff);
+        }
+
+    return 0;
+}
+#endif /* DEBUG */
+
 static int load_enclave_binary(sgx_arch_secs_t* secs, int fd, unsigned long base,
                                unsigned long prot) {
     int ret = 0;
 
     if (IS_ERR(ret = INLINE_SYSCALL(lseek, 3, fd, 0, SEEK_SET)))
-        return -ERRNO(ret);
+        return ret;
 
     char filebuf[FILEBUF_SIZE];
     ret = INLINE_SYSCALL(read, 3, fd, filebuf, FILEBUF_SIZE);
     if (IS_ERR(ret))
-        return -ERRNO(ret);
+        return ret;
 
     const ElfW(Ehdr)* header = (void*)filebuf;
     const ElfW(Phdr)* phdr   = (void*)filebuf + header->e_phoff;
@@ -231,14 +213,14 @@ static int load_enclave_binary(sgx_arch_secs_t* secs, int fd, unsigned long base
     return 0;
 }
 
-static int initialize_enclave(struct pal_enclave* enclave) {
+static int initialize_enclave(struct pal_enclave* enclave, const char* manifest_to_measure) {
     int ret = 0;
     int enclave_image = -1;
     sgx_arch_token_t enclave_token;
     sgx_arch_enclave_css_t enclave_sigstruct;
     sgx_arch_secs_t enclave_secs;
     unsigned long enclave_entry_addr;
-    unsigned long heap_min = DEFAULT_HEAP_MIN;
+    unsigned long enclave_heap_min;
 
     int enclave_mem = -1;
 
@@ -248,69 +230,20 @@ static int initialize_enclave(struct pal_enclave* enclave) {
     enclave_image = INLINE_SYSCALL(open, 3, enclave->libpal_uri + URI_PREFIX_FILE_LEN, O_RDONLY, 0);
     if (IS_ERR(enclave_image)) {
         SGX_DBG(DBG_E, "Cannot find enclave image: %s\n", enclave->libpal_uri);
-        ret = -ERRNO(enclave_image);
+        ret = enclave_image;
         goto out;
     }
 
-    char cfgbuf[CONFIG_MAX];
-
-    /* Reading sgx.enclave_size from manifest */
-    if (get_config(enclave->config, "sgx.enclave_size", cfgbuf, sizeof(cfgbuf)) <= 0) {
-        SGX_DBG(DBG_E, "Enclave size is not specified\n");
-        ret = -EINVAL;
-        goto out;
-    }
-
-    enclave->size = parse_int(cfgbuf);
-    if (!enclave->size || !IS_POWER_OF_2(enclave->size)) {
-        SGX_DBG(DBG_E, "Enclave size not a power of two (an SGX-imposed requirement)\n");
-        ret = -EINVAL;
-        goto out;
-    }
-
-    /* Reading sgx.thread_num from manifest */
-    if (get_config(enclave->config, "sgx.thread_num", cfgbuf, sizeof(cfgbuf)) > 0) {
-        enclave->thread_num = parse_int(cfgbuf);
-
-        if (enclave->thread_num > MAX_DBG_THREADS) {
-            SGX_DBG(DBG_E, "Too many threads to debug\n");
-            ret = -EINVAL;
-            goto out;
-        }
+    if (enclave->use_static_address) {
+        /* executable is static, i.e. it is non-PIE: enclave base address must cover code segment
+         * loaded at 0x400000, and heap cannot start at zero (modern OSes do not allow this) */
+        enclave->baseaddr = DEFAULT_ENCLAVE_BASE;
+        enclave_heap_min  = DEFAULT_HEAP_MIN;
     } else {
-        enclave->thread_num = 1;
-    }
-
-    if (get_config(enclave->config, "sgx.rpc_thread_num", cfgbuf, sizeof(cfgbuf)) > 0) {
-        enclave->rpc_thread_num = parse_int(cfgbuf);
-
-        if (enclave->rpc_thread_num > MAX_RPC_THREADS) {
-            SGX_DBG(DBG_E, "Too many RPC threads specified\n");
-            ret = -EINVAL;
-            goto out;
-        }
-
-        if (enclave->rpc_thread_num && enclave->thread_num > RPC_QUEUE_SIZE) {
-            SGX_DBG(DBG_E,
-                    "Too many threads for exitless feature (more than capacity of RPC queue)\n");
-            ret = -EINVAL;
-            goto out;
-        }
-    } else {
-        enclave->rpc_thread_num = 0; /* by default, do not use exitless feature */
-    }
-
-    if (get_config(enclave->config, "sgx.static_address", cfgbuf, sizeof(cfgbuf)) > 0
-            && cfgbuf[0] == '1') {
-        enclave->baseaddr = ALIGN_DOWN_POW2(heap_min, enclave->size);
-    } else {
-        enclave->baseaddr = ENCLAVE_HIGH_ADDRESS;
-        heap_min = 0;
-    }
-
-    if (get_config(enclave->config, "sgx.enable_stats", cfgbuf, sizeof(cfgbuf)) > 0 &&
-            cfgbuf[0] == '1') {
-        g_sgx_enable_stats = true;
+        /* executable is not static, i.e. it is PIE: enclave base address can be arbitrary (we
+         * choose it same as enclave_size), and heap can start immediately at this base address */
+        enclave->baseaddr = enclave->size;
+        enclave_heap_min  = 0;
     }
 
     ret = read_enclave_token(enclave->token, &enclave_token);
@@ -319,6 +252,20 @@ static int initialize_enclave(struct pal_enclave* enclave) {
         goto out;
     }
     enclave->pal_sec.enclave_attributes = enclave_token.body.attributes;
+
+#ifdef DEBUG
+    if (enclave->profile_enable) {
+        if (!(enclave->pal_sec.enclave_attributes.flags & SGX_FLAGS_DEBUG)) {
+            SGX_DBG(DBG_E, "Cannot use \'sgx.profile\' with a production enclave\n");
+            ret = -EINVAL;
+            goto out;
+        }
+
+        ret = sgx_profile_init();
+        if (ret < 0)
+            goto out;
+    }
+#endif
 
     ret = read_enclave_sigstruct(enclave->sigfile, &enclave_sigstruct);
     if (ret < 0) {
@@ -337,21 +284,26 @@ static int initialize_enclave(struct pal_enclave* enclave) {
 
     enclave->ssaframesize = enclave_secs.ssa_frame_size * g_page_size;
 
-    struct stat stat;
-    ret = INLINE_SYSCALL(fstat, 2, enclave->manifest, &stat);
-    if (IS_ERR(ret)) {
-        SGX_DBG(DBG_E, "Reading manifest file's size failed: %d\n", -ret);
-        ret = -ERRNO(ret);
-        goto out;
-    }
-    int manifest_size = stat.st_size;
-
     /* Start populating enclave memory */
     struct mem_area {
         const char* desc;
         bool skip_eextend;
-        int fd;
-        bool is_binary; /* only meaningful if fd != -1 */
+
+        enum {
+            ELF_FD, // read from `fd` and parse as ELF
+            ZERO,
+            BUF,
+            TCS,
+            TLS
+        } data_src;
+        union {
+            int fd; // valid iff data_src == ELF_FD
+            struct { // valid iff data_src == BUF
+                const char* buf;
+                size_t buf_size;
+            };
+        };
+
         unsigned long addr, size, prot;
         enum sgx_page_type type;
     };
@@ -368,10 +320,12 @@ static int initialize_enclave(struct pal_enclave* enclave) {
     /* The manifest needs to be allocated at the upper end of the enclave
      * memory. That's used by pal_linux_main to find the manifest area. So add
      * it first to the list with memory areas. */
+    size_t manifest_size = strlen(manifest_to_measure) + 1;
     areas[area_num] = (struct mem_area){.desc         = "manifest",
                                         .skip_eextend = false,
-                                        .fd           = enclave->manifest,
-                                        .is_binary    = false,
+                                        .data_src     = BUF,
+                                        .buf          = manifest_to_measure,
+                                        .buf_size     = manifest_size,
                                         .addr         = 0,
                                         .size         = ALLOC_ALIGN_UP(manifest_size),
                                         .prot         = PROT_READ,
@@ -381,8 +335,7 @@ static int initialize_enclave(struct pal_enclave* enclave) {
     areas[area_num] =
         (struct mem_area){.desc         = "ssa",
                           .skip_eextend = false,
-                          .fd           = -1,
-                          .is_binary    = false,
+                          .data_src     = ZERO,
                           .addr         = 0,
                           .size         = enclave->thread_num * enclave->ssaframesize * SSAFRAMENUM,
                           .prot         = PROT_READ | PROT_WRITE,
@@ -391,8 +344,7 @@ static int initialize_enclave(struct pal_enclave* enclave) {
 
     areas[area_num] = (struct mem_area){.desc = "tcs",
                                         .skip_eextend = false,
-                                        .fd           = -1,
-                                        .is_binary    = false,
+                                        .data_src     = TCS,
                                         .addr         = 0,
                                         .size         = enclave->thread_num * g_page_size,
                                         .prot         = PROT_READ | PROT_WRITE,
@@ -401,8 +353,7 @@ static int initialize_enclave(struct pal_enclave* enclave) {
 
     areas[area_num] = (struct mem_area){.desc         = "tls",
                                         .skip_eextend = false,
-                                        .fd           = -1,
-                                        .is_binary    = false,
+                                        .data_src     = TLS,
                                         .addr         = 0,
                                         .size         = enclave->thread_num * g_page_size,
                                         .prot         = PROT_READ | PROT_WRITE,
@@ -413,8 +364,7 @@ static int initialize_enclave(struct pal_enclave* enclave) {
     for (uint32_t t = 0; t < enclave->thread_num; t++) {
         areas[area_num] = (struct mem_area){.desc         = "stack",
                                             .skip_eextend = false,
-                                            .fd           = -1,
-                                            .is_binary    = false,
+                                            .data_src     = ZERO,
                                             .addr         = 0,
                                             .size         = ENCLAVE_STACK_SIZE,
                                             .prot         = PROT_READ | PROT_WRITE,
@@ -426,8 +376,7 @@ static int initialize_enclave(struct pal_enclave* enclave) {
     for (uint32_t t = 0; t < enclave->thread_num; t++) {
         areas[area_num] = (struct mem_area){.desc         = "sig_stack",
                                             .skip_eextend = false,
-                                            .fd           = -1,
-                                            .is_binary    = false,
+                                            .data_src     = ZERO,
                                             .addr         = 0,
                                             .size         = ENCLAVE_SIG_STACK_SIZE,
                                             .prot         = PROT_READ | PROT_WRITE,
@@ -437,10 +386,9 @@ static int initialize_enclave(struct pal_enclave* enclave) {
 
     areas[area_num] = (struct mem_area){.desc         = "pal",
                                         .skip_eextend = false,
+                                        .data_src     = ELF_FD,
                                         .fd           = enclave_image,
-                                        .is_binary    = true,
-                                        .addr         = 0,
-                                        .size         = 0 /* set below */,
+                                        /* `addr` and `size` are set below */
                                         .prot         = 0,
                                         .type         = SGX_PAGE_REG};
     struct mem_area* pal_area = &areas[area_num++];
@@ -452,22 +400,19 @@ static int initialize_enclave(struct pal_enclave* enclave) {
     }
 
     struct mem_area* exec_area = NULL;
-    if (enclave->exec != -1) {
-        areas[area_num] = (struct mem_area){.desc         = "exec",
-                                            .skip_eextend = false,
-                                            .fd           = enclave->exec,
-                                            .is_binary    = true,
-                                            .addr         = 0,
-                                            .size         = 0 /* set below */,
-                                            .prot         = PROT_WRITE,
-                                            .type         = SGX_PAGE_REG};
-        exec_area = &areas[area_num++];
+    areas[area_num] = (struct mem_area){.desc         = "exec",
+                                        .skip_eextend = false,
+                                        .data_src     = ELF_FD,
+                                        .fd           = enclave->exec,
+                                        /* `addr` and `size` are set below */
+                                        .prot         = PROT_WRITE,
+                                        .type         = SGX_PAGE_REG};
+    exec_area = &areas[area_num++];
 
-        ret = scan_enclave_binary(enclave->exec, &exec_area->addr, &exec_area->size, NULL);
-        if (ret < 0) {
-            SGX_DBG(DBG_E, "Scanning application binary failed: %d\n", -ret);
-            goto out;
-        }
+    ret = scan_enclave_binary(enclave->exec, &exec_area->addr, &exec_area->size, NULL);
+    if (ret < 0) {
+        SGX_DBG(DBG_E, "Scanning application binary failed: %d\n", -ret);
+        goto out;
     }
 
     unsigned long populating = enclave->size;
@@ -482,21 +427,20 @@ static int initialize_enclave(struct pal_enclave* enclave) {
 
     if (exec_area) {
         if (exec_area->addr + exec_area->size > pal_area->addr) {
-            SGX_DBG(DBG_E, "Application binary overlaps with Pal binary\n");
+            SGX_DBG(DBG_E, "Application binary overlaps with PAL binary\n");
             ret = -EINVAL;
             goto out;
         }
 
         if (exec_area->addr + exec_area->size < populating) {
-            if (populating > heap_min) {
+            if (populating > enclave_heap_min) {
                 unsigned long addr = exec_area->addr + exec_area->size;
-                if (addr < heap_min)
-                    addr = heap_min;
+                if (addr < enclave_heap_min)
+                    addr = enclave_heap_min;
 
                 areas[area_num] = (struct mem_area){.desc         = "free",
                                                     .skip_eextend = true,
-                                                    .fd           = -1,
-                                                    .is_binary    = false,
+                                                    .data_src     = ZERO,
                                                     .addr         = addr,
                                                     .size         = populating - addr,
                                                     .prot = PROT_READ | PROT_WRITE | PROT_EXEC,
@@ -508,20 +452,19 @@ static int initialize_enclave(struct pal_enclave* enclave) {
         }
     }
 
-    if (populating > heap_min) {
+    if (populating > enclave_heap_min) {
         areas[area_num] = (struct mem_area){.desc         = "free",
                                             .skip_eextend = true,
-                                            .fd           = -1,
-                                            .is_binary    = false,
-                                            .addr         = heap_min,
-                                            .size         = populating - heap_min,
+                                            .data_src     = ZERO,
+                                            .addr         = enclave_heap_min,
+                                            .size         = populating - enclave_heap_min,
                                             .prot         = PROT_READ | PROT_WRITE | PROT_EXEC,
                                             .type         = SGX_PAGE_REG};
         area_num++;
     }
 
     for (int i = 0; i < area_num; i++) {
-        if (areas[i].fd != -1 && areas[i].is_binary) {
+        if (areas[i].data_src == ELF_FD) {
             ret = load_enclave_binary(&enclave_secs, areas[i].fd, areas[i].addr, areas[i].prot);
             if (ret < 0) {
                 SGX_DBG(DBG_E, "Loading enclave binary failed: %d\n", -ret);
@@ -531,16 +474,17 @@ static int initialize_enclave(struct pal_enclave* enclave) {
         }
 
         void* data = NULL;
-
-        if (!strcmp_static(areas[i].desc, "tls")) {
+        if (areas[i].data_src != ZERO) {
             data = (void*)INLINE_SYSCALL(mmap, 6, NULL, areas[i].size, PROT_READ | PROT_WRITE,
                                          MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
             if (IS_ERR_P(data) || data == NULL) {
                 /* Note that Graphene currently doesn't handle 0x0 addresses */
-                SGX_DBG(DBG_E, "Allocating memory for tls pages failed\n");
+                SGX_DBG(DBG_E, "Allocating memory failed\n");
                 goto out;
             }
+        }
 
+        if (areas[i].data_src == TLS) {
             for (uint32_t t = 0; t < enclave->thread_num; t++) {
                 struct enclave_tls* gs = data + g_page_size * t;
                 memset(gs, 0, g_page_size);
@@ -556,7 +500,7 @@ static int initialize_enclave(struct pal_enclave* enclave) {
                           enclave_secs.base;
                 gs->gpr = gs->ssa + enclave->ssaframesize - sizeof(sgx_pal_gpr_t);
                 gs->manifest_size = manifest_size;
-                gs->heap_min = (void*)enclave_secs.base + heap_min;
+                gs->heap_min = (void*)enclave_secs.base + enclave_heap_min;
                 gs->heap_max = (void*)enclave_secs.base + pal_area->addr;
                 if (exec_area) {
                     gs->exec_addr = (void*)enclave_secs.base + exec_area->addr;
@@ -564,15 +508,7 @@ static int initialize_enclave(struct pal_enclave* enclave) {
                 }
                 gs->thread = NULL;
             }
-        } else if (!strcmp_static(areas[i].desc, "tcs")) {
-            data = (void*)INLINE_SYSCALL(mmap, 6, NULL, areas[i].size, PROT_READ | PROT_WRITE,
-                                         MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
-            if (IS_ERR_P(data) || data == NULL) {
-                /* Note that Graphene currently doesn't handle 0x0 addresses */
-                SGX_DBG(DBG_E, "Allocating memory for tcs pages failed\n");
-                goto out;
-            }
-
+        } else if (areas[i].data_src == TCS) {
             for (uint32_t t = 0; t < enclave->thread_num; t++) {
                 sgx_arch_tcs_t* tcs = data + g_page_size * t;
                 memset(tcs, 0, g_page_size);
@@ -585,14 +521,10 @@ static int initialize_enclave(struct pal_enclave* enclave) {
                 tcs->ogs_limit = 0xfff;
                 tcs_addrs[t] = (void*)enclave_secs.base + tcs_area->addr + g_page_size * t;
             }
-        } else if (areas[i].fd != -1) {
-            data = (void*)INLINE_SYSCALL(mmap, 6, NULL, areas[i].size, PROT_READ,
-                                         MAP_FILE | MAP_PRIVATE, areas[i].fd, 0);
-            if (IS_ERR_P(data) || data == NULL) {
-                /* Note that Graphene currently doesn't handle 0x0 addresses */
-                SGX_DBG(DBG_E, "Allocating memory for file %s failed\n", areas[i].desc);
-                goto out;
-            }
+        } else if (areas[i].data_src == BUF) {
+            memcpy(data, areas[i].buf, areas[i].buf_size);
+        } else {
+            assert(areas[i].data_src == ZERO);
         }
 
         ret = add_pages_to_enclave(&enclave_secs, (void*)areas[i].addr, data, areas[i].size,
@@ -663,6 +595,26 @@ static int initialize_enclave(struct pal_enclave* enclave) {
         }
     }
 
+#ifdef DEBUG
+    if (enclave->profile_enable) {
+        /*
+         * Report libpal map. All subsequent files will be reported via DkDebugAddMap(), but this
+         * one has to be handled separately.
+         *
+         * We report it here, before enclave start (as opposed to setup_pal_map()), because we want
+         * the mmap to appear in profiling data before the samples from libpal code, so that the
+         * addresses for these samples can be resolved to symbols.
+         *
+         * TODO: Also report the map to GDB before enclave start (and not in setup_pal_map()), so
+         * that libpal symbols are known to gdb immediately after enclave start.
+         */
+        ret = report_mmaps(enclave_image, enclave->libpal_uri + URI_PREFIX_FILE_LEN,
+                           pal_area->addr);
+        if (IS_ERR(ret))
+            goto out;
+    }
+#endif
+
     ret = 0;
 
 out:
@@ -680,73 +632,254 @@ static void create_instance(struct pal_sec* pal_sec) {
     pal_sec->instance_id = id;
 }
 
-static int load_manifest(int fd, struct config_store** config_ptr) {
+static int parse_loader_config(char* loader_config, struct pal_enclave* enclave_info) {
     int ret = 0;
+    toml_table_t* manifest_root = NULL;
+    char* sgx_ra_client_spid_str = NULL;
 
-    int nbytes = INLINE_SYSCALL(lseek, 3, fd, 0, SEEK_END);
-    if (IS_ERR(nbytes)) {
-        SGX_DBG(DBG_E, "Cannot detect size of manifest file\n");
-        return -ERRNO(nbytes);
-    }
-
-    struct config_store* config = malloc(sizeof(struct config_store));
-    if (!config) {
-        SGX_DBG(DBG_E, "Not enough memory for config_store of manifest\n");
-        return -ENOMEM;
-    }
-
-    void* config_raw = (void*)INLINE_SYSCALL(mmap, 6, NULL, nbytes, PROT_READ, MAP_PRIVATE, fd, 0);
-    if (IS_ERR_P(config_raw)) {
-        SGX_DBG(DBG_E, "Cannot mmap manifest file\n");
-        ret = -ERRNO_P(config_raw);
+    char errbuf[256];
+    manifest_root = toml_parse(loader_config, errbuf, sizeof(errbuf));
+    if (!manifest_root) {
+        SGX_DBG(DBG_E, "PAL failed at parsing the manifest: %s\n"
+                "  Graphene switched to the TOML format recently, please update the manifest\n"
+                "  (in particular, string values must be put in double quotes)\n", errbuf);
+        ret = -EINVAL;
         goto out;
     }
 
-    config->raw_data = config_raw;
-    config->raw_size = nbytes;
-    config->malloc   = malloc;
-    config->free     = NULL;
-
-    const char* errstring = NULL;
-    ret = read_config(config, NULL, &errstring);
+    ret = toml_sizestring_in(manifest_root, "sgx.enclave_size", /*defaultval=*/0,
+                             &enclave_info->size);
     if (ret < 0) {
-        SGX_DBG(DBG_E, "Cannot read manifest: %s\n", errstring);
+        SGX_DBG(DBG_E, "Cannot parse \'sgx.enclave_size\' "
+                       "(the value must be put in double quotes!)\n");
+        ret = -EINVAL;
         goto out;
     }
 
-    *config_ptr = config;
+    if (!enclave_info->size || !IS_POWER_OF_2(enclave_info->size)) {
+        SGX_DBG(DBG_E, "Enclave size not a power of two (an SGX-imposed requirement)\n");
+        ret = -EINVAL;
+        goto out;
+    }
+
+    int64_t thread_num_int64;
+    ret = toml_int_in(manifest_root, "sgx.thread_num", /*defaultval=*/0, &thread_num_int64);
+    if (ret < 0) {
+        SGX_DBG(DBG_E, "Cannot parse \'sgx.thread_num\'\n");
+        ret = -EINVAL;
+        goto out;
+    }
+
+    if (thread_num_int64 < 0) {
+        SGX_DBG(DBG_E, "Negative \'sgx.thread_num\' is impossible\n");
+        ret = -EINVAL;
+        goto out;
+    }
+
+    enclave_info->thread_num = thread_num_int64;
+
+    if (!enclave_info->thread_num) {
+        SGX_DBG(DBG_I, "Number of enclave threads (\'sgx.thread_num\') is not specified; "
+                       "assumed to be 1\n");
+        enclave_info->thread_num = 1;
+    }
+
+    if (enclave_info->thread_num > MAX_DBG_THREADS) {
+        SGX_DBG(DBG_E, "Too large \'sgx.thread_num\', maximum allowed is %d\n", MAX_DBG_THREADS);
+        ret = -EINVAL;
+        goto out;
+    }
+
+    int64_t rpc_thread_num_int64;
+    ret = toml_int_in(manifest_root, "sgx.rpc_thread_num", /*defaultval=*/0, &rpc_thread_num_int64);
+    if (ret < 0) {
+        SGX_DBG(DBG_E, "Cannot parse \'sgx.rpc_thread_num\'\n");
+        ret = -EINVAL;
+        goto out;
+    }
+
+    if (rpc_thread_num_int64 < 0) {
+        SGX_DBG(DBG_E, "Negative \'sgx.rpc_thread_num\' is impossible\n");
+        ret = -EINVAL;
+        goto out;
+    }
+
+    enclave_info->rpc_thread_num = rpc_thread_num_int64;
+
+    if (enclave_info->rpc_thread_num > MAX_RPC_THREADS) {
+        SGX_DBG(DBG_E, "Too large \'sgx.rpc_thread_num\', maximum allowed is %d\n",
+                MAX_RPC_THREADS);
+        ret = -EINVAL;
+        goto out;
+    }
+
+    if (enclave_info->rpc_thread_num && enclave_info->thread_num > RPC_QUEUE_SIZE) {
+        SGX_DBG(DBG_E, "Too many threads for exitless feature (more than capacity of RPC queue)\n");
+        ret = -EINVAL;
+        goto out;
+    }
+
+    int64_t static_address;
+    ret = toml_int_in(manifest_root, "sgx.static_address", /*defaultval=*/0, &static_address);
+    if (ret < 0 || (static_address != 0 && static_address != 1)) {
+        SGX_DBG(DBG_E, "Cannot parse \'sgx.static_address\' (the value must be 0 or 1)\n");
+        ret = -EINVAL;
+        goto out;
+    }
+    enclave_info->use_static_address = !!static_address;
+
+    int64_t enable_stats_int64;
+    ret = toml_int_in(manifest_root, "sgx.enable_stats", /*defaultval=*/0, &enable_stats_int64);
+    if (ret < 0 || (enable_stats_int64 != 0 && enable_stats_int64 != 1)) {
+        SGX_DBG(DBG_E, "Cannot parse \'sgx.enable_stats\' (the value must be 0 or 1)\n");
+        ret = -EINVAL;
+        goto out;
+    }
+    g_sgx_enable_stats = !!enable_stats_int64;
+
+    char* dummy_sigfile_str = NULL;
+    ret = toml_string_in(manifest_root, "sgx.sigfile", &dummy_sigfile_str);
+    if (ret < 0 || dummy_sigfile_str) {
+        SGX_DBG(DBG_E, "sgx.sigfile is not supported anymore. Please update your manifest "
+                       "according to the current documentation.\n");
+        ret = -EINVAL;
+        goto out;
+    }
+    free(dummy_sigfile_str);
+
+    int64_t sgx_remote_attestation_int;
+    ret = toml_int_in(manifest_root, "sgx.remote_attestation", /*defaultval=*/0,
+                      &sgx_remote_attestation_int);
+    if (ret < 0 || (sgx_remote_attestation_int != 0 && sgx_remote_attestation_int != 1)) {
+        SGX_DBG(DBG_E, "Cannot parse \'sgx.remote_attestation\' (the value must be 0 or 1)\n");
+        ret = -EINVAL;
+        goto out;
+    }
+    enclave_info->remote_attestation_enabled = !!sgx_remote_attestation_int;
+
+    ret = toml_string_in(manifest_root, "sgx.ra_client_spid", &sgx_ra_client_spid_str);
+    if (ret < 0) {
+        SGX_DBG(DBG_E, "Cannot parse \'sgx.ra_client_spid\' "
+                       "(the value must be put in double quotes!)\n");
+        ret = -EINVAL;
+        goto out;
+    }
+
+    int64_t sgx_ra_client_linkable_int;
+    ret = toml_int_in(manifest_root, "sgx.ra_client_linkable", /*defaultval=*/-1,
+                      &sgx_ra_client_linkable_int);
+    if (ret < 0) {
+        SGX_DBG(DBG_E, "Cannot parse \'sgx.ra_client_linkable\'\n");
+        ret = -EINVAL;
+        goto out;
+    }
+
+    if (!enclave_info->remote_attestation_enabled &&
+            (sgx_ra_client_spid_str || sgx_ra_client_linkable_int >= 0)) {
+        SGX_DBG(DBG_E,
+                "Detected EPID remote attestation parameters \'ra_client_spid\' and/or "
+                "\'ra_client_linkable\' in the manifest but no \'remote_attestation\' parameter. "
+                "Please add \'sgx.remote_attestation = 1\' to the manifest.\n");
+        ret = -EINVAL;
+        goto out;
+    }
+
+    /* EPID is used if SPID is a non-empty string in manifest, otherwise DCAP/ECDSA */
+    enclave_info->use_epid_attestation = sgx_ra_client_spid_str && strlen(sgx_ra_client_spid_str);
+
+    char* profile_str = NULL;
+    ret = toml_string_in(manifest_root, "sgx.profile.enable", &profile_str);
+    if (ret < 0) {
+        SGX_DBG(DBG_E, "Cannot parse \'sgx.profile.enable\' "
+                "(the value must be \"none\", \"main\" or \"all\")\n");
+        ret = -EINVAL;
+        goto out;
+    }
+
+#ifdef DEBUG
+    enclave_info->profile_enable = false;
+    enclave_info->profile_filename[0] = '\0';
+
+    if (!profile_str || !strcmp(profile_str, "none")) {
+        // do not enable
+    } else if (!strcmp(profile_str, "main")) {
+        if (enclave_info->is_first_process) {
+            snprintf(enclave_info->profile_filename, ARRAY_SIZE(enclave_info->profile_filename),
+                     SGX_PROFILE_FILENAME);
+            enclave_info->profile_enable = true;
+        }
+    } else if (!strcmp(profile_str, "all")) {
+        enclave_info->profile_enable = true;
+        snprintf(enclave_info->profile_filename, ARRAY_SIZE(enclave_info->profile_filename),
+                 SGX_PROFILE_FILENAME_WITH_PID, (int)INLINE_SYSCALL(getpid, 0));
+    } else {
+        SGX_DBG(DBG_E, "Invalid \'sgx.profile.enable\' "
+                "(the value must be \"none\", \"main\" or \"all\")\n");
+        ret = -EINVAL;
+        goto out;
+    }
+
+    int64_t profile_with_stack;
+    ret = toml_int_in(manifest_root, "sgx.profile.with_stack", /*defaultval=*/0,
+                      &profile_with_stack);
+    if (ret < 0 || (profile_with_stack != 0 && profile_with_stack != 1)) {
+        SGX_DBG(DBG_E, "Cannot parse \'sgx.profile.with_stack\' (the value must be 0 or 1)\n");
+        ret = -EINVAL;
+        goto out;
+    }
+    enclave_info->profile_with_stack = profile_with_stack;
+
+    int64_t profile_frequency;
+    ret = toml_int_in(manifest_root, "sgx.profile.frequency", SGX_PROFILE_DEFAULT_FREQUENCY,
+                      &profile_frequency);
+    if (ret < 0 || !(0 < profile_frequency && profile_frequency <= SGX_PROFILE_MAX_FREQUENCY)) {
+        SGX_DBG(DBG_E, "Cannot parse \'sgx.profile.frequency\' "
+                "(the value must be between 1 and %d)\n", SGX_PROFILE_MAX_FREQUENCY);
+        ret = -EINVAL;
+        goto out;
+    }
+    enclave_info->profile_frequency = profile_frequency;
+#else
+    if (profile_str && strcmp(profile_str, "none")) {
+        SGX_DBG(DBG_E, "Invalid \'sgx.profile.enable\' "
+                "(SGX profiling works only when Graphene is compiled with DEBUG=1)\n");
+        ret = -EINVAL;
+        goto out;
+    }
+#endif
+
     ret = 0;
 
 out:
-    if (ret < 0) {
-        free(config);
-        if (!IS_ERR_P(config_raw))
-            INLINE_SYSCALL(munmap, 2, config_raw, nbytes);
-    }
+    free(sgx_ra_client_spid_str);
+    toml_free(manifest_root);
     return ret;
 }
 
-/*
- * Returns the number of online CPUs read from /sys/devices/system/cpu/online, -errno on failure.
- * Understands complex formats like "1,3-5,6".
+/* Opens a pseudo-file describing HW resources such as online CPUs and counts the number of
+ * HW resources present in the file (if count == true) or simply reads the integer stored in the
+ * file (if count == false). For example on a single-core machine, calling this function on
+ * `/sys/devices/system/cpu/online` with count == true will return 1 and 0 with count == false.
+ * Returns UNIX error code on failure.
+ * N.B: Understands complex formats like "1,3-5,6" when called with count == true.
  */
-static int get_cpu_count(void) {
-    int fd = INLINE_SYSCALL(open, 3, "/sys/devices/system/cpu/online", O_RDONLY | O_CLOEXEC, 0);
-    if (fd < 0)
-        return unix_to_pal_error(ERRNO(fd));
+static int get_hw_resource(const char* filename, bool count) {
+    int fd = INLINE_SYSCALL(open, 3, filename, O_RDONLY | O_CLOEXEC, 0);
+    if (IS_ERR(fd))
+        return fd;
 
     char buf[64];
     int ret = INLINE_SYSCALL(read, 3, fd, buf, sizeof(buf) - 1);
-    if (ret < 0) {
-        INLINE_SYSCALL(close, 1, fd);
-        return unix_to_pal_error(ERRNO(ret));
-    }
+    INLINE_SYSCALL(close, 1, fd);
+    if (IS_ERR(ret))
+        return ret;
 
     buf[ret] = '\0'; /* ensure null-terminated buf even in partial read */
 
     char* end;
     char* ptr = buf;
-    int cpu_count = 0;
+    int resource_cnt = 0;
+    int retval = -ENOENT;
     while (*ptr) {
         while (*ptr == ' ' || *ptr == '\t' || *ptr == ',')
             ptr++;
@@ -755,30 +888,40 @@ static int get_cpu_count(void) {
         if (ptr == end)
             break;
 
+        /* caller wants to read an int stored in the file */
+        if (!count) {
+            if (*end == '\n' || *end == '\0')
+                retval = firstint;
+            return retval;
+        }
+
+        /* caller wants to count the number of HW resources */
         if (*end == '\0' || *end == ',' || *end == '\n') {
-            /* single CPU index, count as one more CPU */
-            cpu_count++;
+            /* single HW resource index, count as one more */
+            resource_cnt++;
         } else if (*end == '-') {
-            /* CPU range, count how many CPUs in range */
+            /* HW resource range, count how many HW resources are in range */
             ptr = end + 1;
             int secondint = (int)strtol(ptr, &end, 10);
             if (secondint > firstint)
-                cpu_count += secondint - firstint + 1; // inclusive (e.g., 0-7, or 8-16)
+                resource_cnt += secondint - firstint + 1; // inclusive (e.g., 0-7, or 8-16)
         }
         ptr = end;
     }
 
-    INLINE_SYSCALL(close, 1, fd);
-    if (cpu_count == 0)
-        return -PAL_ERROR_STREAMNOTEXIST;
-    return cpu_count;
+    if (count && resource_cnt > 0)
+        retval = resource_cnt;
+
+    return retval;
 }
 
-static int load_enclave(struct pal_enclave* enclave, int manifest_fd, char* manifest_uri,
-                        char* exec_uri, char* args, size_t args_size, char* env, size_t env_size,
-                        bool exec_uri_inferred, bool need_gsgx) {
+/* Warning: This function does not free up resources on failure - it assumes that the whole process
+ * exits after this function's failure. */
+static int load_enclave(struct pal_enclave* enclave, char* loader_config, const char* exec_path,
+                        char* args, size_t args_size, char* env, size_t env_size, bool need_gsgx) {
     struct pal_sec* pal_sec = &enclave->pal_sec;
     int ret;
+    size_t exec_path_len = strlen(exec_path);
 
 #if PRINT_ENCLAVE_STAT == 1
     struct timeval tv;
@@ -796,34 +939,71 @@ static int load_enclave(struct pal_enclave* enclave, int manifest_fd, char* mani
     pal_sec->pid = INLINE_SYSCALL(getpid, 0);
     pal_sec->uid = INLINE_SYSCALL(getuid, 0);
     pal_sec->gid = INLINE_SYSCALL(getgid, 0);
-    int num_cpus = get_cpu_count();
-    if (num_cpus < 0) {
-        return num_cpus;
+
+    /* we cannot use CPUID(0xb) because it counts even disabled-by-BIOS cores (e.g. HT cores);
+     * instead extract info on total number of logical cores, number of physical cores,
+     * SMT support etc. by parsing sysfs pseudo-files */
+    int online_logical_cores = get_hw_resource("/sys/devices/system/cpu/online", /*count=*/true);
+    if (online_logical_cores < 0)
+        return online_logical_cores;
+    pal_sec->online_logical_cores = online_logical_cores;
+
+    int possible_logical_cores = get_hw_resource("/sys/devices/system/cpu/possible",
+                                                 /*count=*/true);
+    /* TODO: correctly support offline cores */
+    if (possible_logical_cores > 0 && possible_logical_cores > online_logical_cores) {
+         printf("Warning: some CPUs seem to be offline; Graphene doesn't take this into account "
+                "which may lead to subpar performance\n");
     }
-    pal_sec->num_cpus = num_cpus;
+
+
+    int core_siblings = get_hw_resource("/sys/devices/system/cpu/cpu0/topology/core_siblings_list",
+                                        /*count=*/true);
+    if (core_siblings < 0)
+        return core_siblings;
+
+    int smt_siblings = get_hw_resource("/sys/devices/system/cpu/cpu0/topology/thread_siblings_list",
+                                       /*count=*/true);
+    if (smt_siblings < 0)
+        return smt_siblings;
+    pal_sec->physical_cores_per_socket = core_siblings / smt_siblings;
+
+    /* array of "logical core -> socket" mappings */
+    int* cpu_socket = (int*)malloc(online_logical_cores * sizeof(int));
+    if (!cpu_socket)
+        return -ENOMEM;
+
+    char filename[128];
+    for (int idx = 0; idx < online_logical_cores; idx++) {
+        snprintf(filename, sizeof(filename),
+                 "/sys/devices/system/cpu/cpu%d/topology/physical_package_id", idx);
+        cpu_socket[idx] = get_hw_resource(filename, /*count=*/false);
+        if (cpu_socket[idx] < 0) {
+            SGX_DBG(DBG_E, "Cannot read %s\n", filename);
+            ret = cpu_socket[idx];
+            free(cpu_socket);
+            return ret;
+        }
+    }
+    pal_sec->cpu_socket = cpu_socket;
 
 #ifdef DEBUG
     size_t env_i = 0;
     while (env_i < env_size) {
-        if (!strcmp_static(&env[env_i], "IN_GDB=1")) {
+        if (!strcmp(&env[env_i], "IN_GDB=1")) {
             SGX_DBG(DBG_I, "[ Running under GDB ]\n");
             pal_sec->in_gdb = true;
-        } else if (strstartswith_static(&env[env_i], "LD_PRELOAD=")) {
-            uint64_t env_i_size = strnlen(&env[env_i], env_size - env_i) + 1;
-            memmove(&env[env_i], &env[env_i + env_i_size], env_size - env_i - env_i_size);
-            env_size -= env_i_size;
-            continue;
         }
 
         env_i += strnlen(&env[env_i], env_size - env_i) + 1;
     }
+
+    enclave->debug_map = NULL;
 #endif
 
-    enclave->manifest = manifest_fd;
-
-    ret = load_manifest(enclave->manifest, &enclave->config);
+    ret = parse_loader_config(loader_config, enclave);
     if (ret < 0) {
-        SGX_DBG(DBG_E, "Invalid manifest: %s\n", manifest_uri);
+        SGX_DBG(DBG_E, "Parsing manifest failed\n");
         return -EINVAL;
     }
 
@@ -838,122 +1018,62 @@ static int load_enclave(struct pal_enclave* enclave, int manifest_fd, char* mani
         return -EINVAL;
     }
 
-    char cfgbuf[CONFIG_MAX];
-    const char* errstring = "out of memory";
-
-    // A manifest can specify an executable with a different base name
-    // than the manifest itself.  Always give the exec field of the manifest
-    // precedence if specified.
-    if (get_config(enclave->config, "loader.exec", cfgbuf, sizeof(cfgbuf)) > 0) {
-        exec_uri = resolve_uri(cfgbuf, &errstring);
-        exec_uri_inferred = false;
-        if (!exec_uri) {
-            SGX_DBG(DBG_E, "%s: %s\n", errstring, cfgbuf);
-            return -EINVAL;
-        }
-    }
-
-    enclave->exec = INLINE_SYSCALL(open, 3, exec_uri + URI_PREFIX_FILE_LEN,
-                                   O_RDONLY|O_CLOEXEC, 0);
+    enclave->exec = INLINE_SYSCALL(open, 3, exec_path, O_RDONLY | O_CLOEXEC, 0);
     if (IS_ERR(enclave->exec)) {
-        if (exec_uri_inferred) {
-            // It is valid for an enclave not to have an executable.
-            // We need to catch the case where we inferred the executable
-            // from the manifest file name, but it doesn't exist, and let
-            // the enclave go a bit further.  Go ahead and warn the user,
-            // though.
-            SGX_DBG(DBG_I,
-                    "Inferred executable cannot be opened: %s.  This may be ok, "
-                    "or may represent a manifest misconfiguration. This typically "
-                    "represents advanced usage, and if it is not what you intended, "
-                    "try setting the loader.exec field in the manifest.\n",
-                    exec_uri);
-            enclave->exec = -1;
-        } else {
-            SGX_DBG(DBG_E, "Cannot open executable %s\n", exec_uri);
-            return -EINVAL;
-        }
-    }
-
-    if (get_config(enclave->config, "sgx.sigfile", cfgbuf, sizeof(cfgbuf)) < 0) {
-        SGX_DBG(DBG_E, "Sigstruct file not found ('sgx.sigfile' must be specified in manifest)\n");
+        SGX_DBG(DBG_E, "Cannot open executable %s\n", exec_path);
         return -EINVAL;
     }
 
-    char* sig_uri = resolve_uri(cfgbuf, &errstring);
-    if (!sig_uri) {
-        SGX_DBG(DBG_E, "%s: %s\n", errstring, cfgbuf);
-        return -EINVAL;
-    }
-
-    if (!strendswith(sig_uri, ".sig")) {
-        SGX_DBG(DBG_E, "Invalid sigstruct file URI as %s\n", cfgbuf);
-        free(sig_uri);
-        return -EINVAL;
-    }
-
-    enclave->sigfile = INLINE_SYSCALL(open, 3, sig_uri + URI_PREFIX_FILE_LEN,
-                                      O_RDONLY|O_CLOEXEC, 0);
-    if (IS_ERR(enclave->sigfile)) {
-        SGX_DBG(DBG_E, "Cannot open sigstruct file %s\n", sig_uri);
-        free(sig_uri);
-        return -EINVAL;
-    }
-
-    char* token_uri = alloc_concat(sig_uri, strlen(sig_uri) - static_strlen(".sig"), ".token", -1);
-    free(sig_uri);
-    if (!token_uri) {
-        INLINE_SYSCALL(close, 1, enclave->sigfile);
+    char* sig_path = alloc_concat(exec_path, exec_path_len, ".sig", -1);
+    if (!sig_path) {
         return -ENOMEM;
     }
 
-    enclave->token = INLINE_SYSCALL(open, 3, token_uri + URI_PREFIX_FILE_LEN, O_RDONLY | O_CLOEXEC,
-                                    0);
-    if (IS_ERR(enclave->token)) {
-        SGX_DBG(DBG_E,
-                "Cannot open token \'%s\'. Use \'"
-                "Pal/src/host/Linux-SGX/signer/pal-sgx-get-token"
-                "\' on the runtime host or run \'make SGX=1 sgx-tokens\' in the Graphene source to "
-                "create the token file.\n",
-                token_uri);
-        free(token_uri);
+    enclave->sigfile = INLINE_SYSCALL(open, 3, sig_path, O_RDONLY | O_CLOEXEC, 0);
+    if (IS_ERR(enclave->sigfile)) {
+        SGX_DBG(DBG_E, "Cannot open sigstruct file %s\n", sig_path);
         return -EINVAL;
     }
-    SGX_DBG(DBG_I, "Token file: %s\n", token_uri);
-    free(token_uri);
+    free(sig_path);
 
-    ret = initialize_enclave(enclave);
+    char* token_path = alloc_concat(exec_path, exec_path_len, ".token", -1);
+    if (!token_path) {
+        return -ENOMEM;
+    }
+
+    enclave->token = INLINE_SYSCALL(open, 3, token_path, O_RDONLY | O_CLOEXEC, 0);
+    if (IS_ERR(enclave->token)) {
+        SGX_DBG(DBG_E,
+                "Cannot open token %s. Use pal-sgx-get-token on the runtime host or run "
+                "`make SGX=1 sgx-tokens` in the Graphene source to create the token file.\n",
+                token_path);
+        return -EINVAL;
+    }
+    SGX_DBG(DBG_I, "Token file: %s\n", token_path);
+    free(token_path);
+
+    ret = initialize_enclave(enclave, loader_config);
     if (ret < 0)
         return ret;
 
     if (!pal_sec->instance_id)
         create_instance(&enclave->pal_sec);
 
-    memcpy(pal_sec->manifest_name, manifest_uri, strlen(manifest_uri) + 1);
-
-    if (enclave->exec == -1) {
-        memset(pal_sec->exec_name, 0, sizeof(PAL_SEC_STR));
-    } else {
-        memcpy(pal_sec->exec_name, exec_uri, strlen(exec_uri) + 1);
+    if (sizeof(pal_sec->exec_name) < URI_PREFIX_FILE_LEN + exec_path_len + 1) {
+        return -E2BIG;
     }
+    memcpy(pal_sec->exec_name, URI_PREFIX_FILE, URI_PREFIX_FILE_LEN);
+    memcpy(pal_sec->exec_name + URI_PREFIX_FILE_LEN, exec_path, exec_path_len + 1);
 
     ret = sgx_signal_setup();
     if (ret < 0)
         return ret;
 
-    if (get_config(enclave->config, "sgx.remote_attestation", cfgbuf, sizeof(cfgbuf)) < 0 &&
-            (get_config(enclave->config, "sgx.ra_client_spid", cfgbuf, sizeof(cfgbuf)) > 0 ||
-             get_config(enclave->config, "sgx.ra_client_linkable", cfgbuf, sizeof(cfgbuf)) > 0)) {
-        SGX_DBG(DBG_E,
-                "Detected EPID remote attestation parameters \'ra_client_spid\' and/or "
-                "\'ra_client_linkable\' in the manifest but no \'remote_attestation\' parameter. "
-                "Please add \'sgx.remote_attestation = 1\' to the manifest.\n");
-        return -EINVAL;
-    }
-
-    if (get_config(enclave->config, "sgx.remote_attestation", cfgbuf, sizeof(cfgbuf)) > 0) {
+    if (enclave->remote_attestation_enabled) {
         /* initialize communication with Quoting Enclave only if app requests attestation */
-        ret = init_quoting_enclave_targetinfo(&pal_sec->qe_targetinfo);
+        bool is_epid = enclave->use_epid_attestation;
+        SGX_DBG(DBG_I, "Using SGX %s attestation\n", is_epid ? "EPID" : "DCAP/ECDSA");
+        ret = init_quoting_enclave_targetinfo(is_epid, &pal_sec->qe_targetinfo);
         if (ret < 0)
             return ret;
     }
@@ -980,31 +1100,20 @@ static int load_enclave(struct pal_enclave* enclave, int manifest_fd, char* mani
     return 0;
 }
 
-/* Grow stack of main thread to THREAD_STACK_SIZE by allocating a large dummy array and probing
- * each stack page (Linux dynamically grows the stack of the main thread but gets confused with
+/* Grow the stack of the main thread to THREAD_STACK_SIZE by probing each stack page above current
+ * stack pointer (Linux dynamically grows the stack of the main thread but gets confused with
  * huge-jump stack accesses coming from within the enclave). Note that other, non-main threads
  * are created manually via clone(.., THREAD_STACK_SIZE, ..) and thus do not need this hack. */
-static void __attribute__((noinline)) force_linux_to_grow_stack(void) {
-    char dummy[THREAD_STACK_SIZE];
-    for (uint64_t i = 0; i < sizeof(dummy); i += PRESET_PAGESIZE) {
-        /* touch each page on the stack just to make it is not optimized away */
-        __asm__ volatile(
-            "movq %0, %%rbx\r\n"
-            "movq (%%rbx), %%rbx\r\n"
-            :
-            : "r"(&dummy[i])
-            : "%rbx");
-    }
+static void force_linux_to_grow_stack(void) {
+    ARCH_PROBE_STACK(THREAD_STACK_SIZE, PRESET_PAGESIZE);
 }
 
 int main(int argc, char* argv[], char* envp[]) {
-    char* manifest_uri = NULL;
-    char* exec_uri = NULL;
-    int fd = -1;
+    char* manifest_path = NULL;
+    char* exec_path = NULL;
     int ret = 0;
-    bool exec_uri_inferred = false; // Handle the case where the exec uri is inferred from
-                                    // the manifest name somewhat differently
     bool need_gsgx = true;
+    char* loader_config = NULL;
 
     force_linux_to_grow_stack();
 
@@ -1029,111 +1138,46 @@ int main(int argc, char* argv[], char* envp[]) {
     }
 
     // Are we the first in this Graphene's namespace?
-    bool first_process = !strcmp_static(argv[2], "init");
-    if (!first_process && strcmp_static(argv[2], "child")) {
+    bool first_process = !strcmp(argv[2], "init");
+    if (!first_process && strcmp(argv[2], "child")) {
         goto usage;
     }
 
     if (first_process) {
-        /* We're the first process created. */
-        exec_uri = alloc_concat(URI_PREFIX_FILE, -1, argv[3], -1);
+        g_pal_enclave.is_first_process = true;
+
+        exec_path = argv[3];
+        manifest_path = alloc_concat(exec_path, -1, ".manifest.sgx", -1);
+        if (!manifest_path) {
+            ret = -ENOMEM;
+            goto out;
+        }
+
+        SGX_DBG(DBG_I, "Manifest file: %s\n", manifest_path);
+        ret = read_text_file_to_cstr(manifest_path, &loader_config);
+        if (ret < 0) {
+            SGX_DBG(DBG_E, "Reading manifest failed\n");
+            goto out;
+        }
+        free(manifest_path);
+        manifest_path = NULL;
     } else {
-        /* We're one of the children spawned to host new processes started inside Graphene.
-         * We'll receive our argv and config via IPC. */
+        /* We're one of the children spawned to host new processes started inside Graphene. */
+        g_pal_enclave.is_first_process = false;
+
+        /* We'll receive our argv and config via IPC. */
         int parent_pipe_fd = atoi(argv[3]);
-        ret = sgx_init_child_process(parent_pipe_fd, &g_pal_enclave.pal_sec);
+        ret = sgx_init_child_process(parent_pipe_fd, &g_pal_enclave.pal_sec, &loader_config);
         if (ret < 0)
             goto out;
-        exec_uri = alloc_concat(g_pal_enclave.pal_sec.exec_name, -1, NULL, -1);
-    }
-
-    if (!exec_uri) {
-        ret = -ENOMEM;
-        goto out;
-    }
-
-    fd = INLINE_SYSCALL(open, 3, exec_uri + URI_PREFIX_FILE_LEN, O_RDONLY | O_CLOEXEC, 0);
-    if (IS_ERR(fd)) {
-        SGX_DBG(DBG_E, "Input file not found: %s\n", exec_uri);
-        goto usage;
-    }
-
-    char file_first_four_bytes[4];
-    ret = INLINE_SYSCALL(read, 3, fd, file_first_four_bytes, sizeof(file_first_four_bytes));
-    if (IS_ERR(ret)) {
-        goto out;
-    }
-    if (ret != sizeof(file_first_four_bytes)) {
-        ret = -EINVAL;
-        goto out;
-    }
-
-    char manifest_base_name[URI_MAX];
-    size_t manifest_base_name_len = sizeof(manifest_base_name);
-    ret = get_base_name(exec_uri + URI_PREFIX_FILE_LEN, manifest_base_name,
-                        &manifest_base_name_len);
-    if (ret < 0) {
-        goto out;
-    }
-
-    if (strendswith(manifest_base_name, ".manifest")) {
-        if (!strcpy_static(manifest_base_name + manifest_base_name_len, ".sgx",
-                           sizeof(manifest_base_name) - manifest_base_name_len)) {
-            ret = -E2BIG;
-            goto out;
-        }
-    } else if (!strendswith(manifest_base_name, ".manifest.sgx")) {
-        if (!strcpy_static(manifest_base_name + manifest_base_name_len, ".manifest.sgx",
-                           sizeof(manifest_base_name) - manifest_base_name_len)) {
-            ret = -E2BIG;
+        exec_path = strdup(g_pal_enclave.pal_sec.exec_name + URI_PREFIX_FILE_LEN);
+        if (!exec_path) {
+            ret = -ENOMEM;
             goto out;
         }
     }
 
-    int manifest_fd = -1;
-
-    if (memcmp(file_first_four_bytes, "\177ELF", sizeof(file_first_four_bytes))) {
-        /* exec_uri doesn't refer to ELF executable, so it must refer to the
-         * manifest. Verify this and update exec_uri with the manifest suffix
-         * removed.
-         */
-
-        size_t exec_uri_len = strlen(exec_uri);
-        if (strendswith(exec_uri, ".manifest")) {
-            exec_uri[exec_uri_len - static_strlen(".manifest")] = '\0';
-        } else if (strendswith(exec_uri, ".manifest.sgx")) {
-            INLINE_SYSCALL(lseek, 3, fd, 0, SEEK_SET);
-            manifest_fd = fd;
-
-            exec_uri[exec_uri_len - static_strlen(".manifest.sgx")] = '\0';
-        } else {
-            SGX_DBG(DBG_E, "Invalid manifest file specified: %s\n", exec_uri);
-            goto usage;
-        }
-
-        exec_uri_inferred = true;
-    }
-
-    if (manifest_fd == -1) {
-        INLINE_SYSCALL(close, 1, fd);
-        fd = manifest_fd = INLINE_SYSCALL(open, 3, manifest_base_name, O_RDONLY | O_CLOEXEC, 0);
-        if (IS_ERR(fd)) {
-            SGX_DBG(DBG_E, "Cannot open manifest file: %s\n", manifest_base_name);
-            goto usage;
-        }
-    }
-
-    manifest_uri = alloc_concat(URI_PREFIX_FILE, URI_PREFIX_FILE_LEN, manifest_base_name, -1);
-    if (!manifest_uri) {
-        ret = -ENOMEM;
-        goto out;
-    }
-
-    SGX_DBG(DBG_I, "Manifest file: %s\n", manifest_uri);
-    if (exec_uri_inferred)
-        SGX_DBG(DBG_I, "Inferred executable file: %s\n", exec_uri);
-    else
-        SGX_DBG(DBG_I, "Executable file: %s\n", exec_uri);
+    SGX_DBG(DBG_I, "Executable file: %s\n", exec_path);
 
     /*
      * While C does not guarantee that the argv[i] and envp[i] strings are
@@ -1150,34 +1194,34 @@ int main(int argc, char* argv[], char* envp[]) {
         args_size = argc > 4 ? (argv[argc - 1] - args) + strlen(argv[argc - 1]) + 1 : 0;
     }
 
-    int envc = 0;
+    size_t envc = 0;
     while (envp[envc] != NULL) {
         envc++;
     }
     char* env = envp[0];
     size_t env_size = envc > 0 ? (envp[envc - 1] - envp[0]) + strlen(envp[envc - 1]) + 1 : 0;
 
-    ret = load_enclave(&g_pal_enclave, manifest_fd, manifest_uri, exec_uri, args, args_size, env,
-                       env_size, exec_uri_inferred, need_gsgx);
+    ret = load_enclave(&g_pal_enclave, loader_config, exec_path, args, args_size, env, env_size,
+                       need_gsgx);
+    if (ret < 0) {
+        SGX_DBG(DBG_E, "load_enclave() failed with error %d\n", ret);
+    }
 
 out:
+    free(manifest_path);
     if (g_pal_enclave.exec >= 0)
         INLINE_SYSCALL(close, 1, g_pal_enclave.exec);
     if (g_pal_enclave.sigfile >= 0)
         INLINE_SYSCALL(close, 1, g_pal_enclave.sigfile);
     if (g_pal_enclave.token >= 0)
         INLINE_SYSCALL(close, 1, g_pal_enclave.token);
-    if (!IS_ERR(fd))
-        INLINE_SYSCALL(close, 1, fd);
-    free(exec_uri);
-    free(manifest_uri);
 
     return ret;
 
 usage:;
     const char* self = argv[0] ?: "<this program>";
     printf("USAGE:\n"
-           "\tFirst process: %s <path to libpal.so> init [<executable>|<manifest>] args...\n"
+           "\tFirst process: %s <path to libpal.so> init <executable> args...\n"
            "\tChildren:      %s <path to libpal.so> child <parent_pipe_fd> args...\n",
            self, self);
     printf("This is an internal interface. Use pal_loader to launch applications in Graphene.\n");

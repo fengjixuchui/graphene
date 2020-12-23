@@ -2,13 +2,11 @@
 /* Copyright (C) 2014 Stony Brook University */
 
 /*
- * shim_malloc.c
+ * This file implements page allocation for the library OS-internal SLAB memory allocator. The slab
+ * allocator is in Pal/lib/slabmgr.h.
  *
- * This file implements page allocation for the library OS-internal SLAB
- * memory allocator.  The slab allocator is in Pal/lib/slabmgr.h.
- *
- * When existing slabs are not sufficient, or a large (4k or greater)
- * allocation is requested, it ends up here (__system_alloc and __system_free).
+ * When existing slabs are not sufficient, or a large (4k or greater) allocation is requested, it
+ * ends up here (__system_alloc and __system_free).
  */
 
 #include <asm/mman.h>
@@ -17,6 +15,7 @@
 #include "pal_debug.h"
 #include "shim_checkpoint.h"
 #include "shim_internal.h"
+#include "shim_lock.h"
 #include "shim_utils.h"
 #include "shim_vma.h"
 
@@ -98,7 +97,7 @@ void* malloc(size_t size) {
          * If malloc() failed internally, we cannot handle the
          * condition and must terminate the current process.
          */
-        SYS_PRINTF("******** Out-of-memory in library OS ********\n");
+        warn("******** Out-of-memory in library OS ********\n");
         __abort();
     }
 

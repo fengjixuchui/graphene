@@ -16,9 +16,9 @@ GRAPHENEKEY ?= $(GRAPHENEDIR)/Pal/src/host/Linux-SGX/signer/enclave-key.pem
 
 ARCH_LIBDIR ?= /lib/x86_64-linux-gnu
 
-# Specify your SPID and linkable/unlinkable attestation policy (only for EPID);
-# these variables will not be used if this example is built for ECDSA/DCAP
-RA_CLIENT_SPID ?= AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+# for EPID attestation, specify your SPID and linkable/unlinkable attestation policy;
+# for DCAP/ECDSA attestation, specify SPID as empty string (linkable value is ignored)
+RA_CLIENT_SPID ?=
 RA_CLIENT_LINKABLE ?= 0
 
 ifeq ($(DEBUG),1)
@@ -171,7 +171,7 @@ client_dcap-deps: client_dcap-list
 client_dcap-trusted-libs: client_dcap-deps
 	@for F in `cat $<`; do \
 		N=`basename $$F | tr --delete '.' | tr --delete '-' | tr --delete '+'`; \
-		echo -n "sgx.trusted_files.$$N = file:$$F\\\\n"; \
+		echo -n "sgx.trusted_files.$$N = \\\"file:$$F\\\"\\\\n"; \
 	done > $@
 
 client_dcap.manifest: client.manifest.template client_dcap-trusted-libs
@@ -213,7 +213,7 @@ client_epid-deps: client_epid-list
 client_epid-trusted-libs: client_epid-deps
 	@for F in `cat $<`; do \
 		N=`basename $$F | tr --delete '.' | tr --delete '-' | tr --delete '+'`; \
-		echo -n "sgx.trusted_files.$$N = file:$$F\\\\n"; \
+		echo -n "sgx.trusted_files.$$N = \\\"file:$$F\\\"\\\\n"; \
 	done > $@
 
 client_epid.manifest: client.manifest.template client_epid-trusted-libs

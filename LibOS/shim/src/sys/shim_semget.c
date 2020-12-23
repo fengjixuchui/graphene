@@ -2,9 +2,7 @@
 /* Copyright (C) 2014 Stony Brook University */
 
 /*
- * shim_semget.c
- *
- * Implementation of system call "semget", "semop", "semtimedop" and "semctl".
+ * Implementation of system calls "semget", "semop", "semtimedop" and "semctl".
  */
 
 #include <errno.h>
@@ -15,6 +13,7 @@
 #include "shim_handle.h"
 #include "shim_internal.h"
 #include "shim_ipc.h"
+#include "shim_lock.h"
 #include "shim_sysv.h"
 #include "shim_table.h"
 #include "shim_utils.h"
@@ -235,7 +234,7 @@ int shim_do_semget(key_t key, int nsems, int semflg) {
         do {
             semid = allocate_ipc_id(0, 0);
             if (!semid)
-                semid = ipc_lease_send(NULL);
+                semid = ipc_lease_send();
         } while (!semid);
 
         if (key != IPC_PRIVATE) {
@@ -615,7 +614,7 @@ int submit_sysv_sem(struct shim_sem_handle* sem, struct sembuf* sops, int nsops,
         if (client) {
             struct shim_ipc_info* owner = sem->owner;
             ret = owner ? ipc_sysv_movres_send(client, owner->vmid, qstrgetstr(&owner->uri),
-                                               sem->lease, sem->semid, SYSV_SEM)
+                                               sem->semid, SYSV_SEM)
                         : -ECONNREFUSED;
             goto out_locked;
         }
@@ -635,7 +634,7 @@ int submit_sysv_sem(struct shim_sem_handle* sem, struct sembuf* sops, int nsops,
         struct sem_ops* op;
 
         LISTP_FOR_EACH_ENTRY(op, &sem->migrated, progress) {
-            if (op->client.vmid == (client ? client->vmid : cur_process.vmid) &&
+            if (op->client.vmid == (client ? client->vmid : g_process_ipc_info.vmid) &&
                 seq == op->client.seq) {
                 LISTP_DEL_INIT(op, &sem->migrated, progress);
                 sem_ops  = op;

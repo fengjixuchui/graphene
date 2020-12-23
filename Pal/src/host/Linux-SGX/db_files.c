@@ -2,11 +2,13 @@
 /* Copyright (C) 2014 Stony Brook University */
 
 /*
- * db_files.c
- *
- * This file contains operands to handle streams with URIs that start with
- * "file:" or "dir:".
+ * This file contains operands to handle streams with URIs that start with "file:" or "dir:".
  */
+
+#include <asm/fcntl.h>
+#include <asm/stat.h>
+#include <linux/fs.h>
+#include <linux/types.h>
 
 #include "api.h"
 #include "pal.h"
@@ -18,20 +20,15 @@
 #include "pal_linux.h"
 #include "pal_linux_defs.h"
 #include "pal_linux_error.h"
-typedef __kernel_pid_t pid_t;
-#undef __GLIBC__
-#include <asm/fcntl.h>
-#include <asm/stat.h>
-#include <linux/fs.h>
-#include <linux/stat.h>
-#include <linux/types.h>
+#include "perm.h"
+#include "stat.h"
 
 #include "enclave_pages.h"
 
 /* 'open' operation for file streams */
 static int file_open(PAL_HANDLE* handle, const char* type, const char* uri, int access, int share,
                      int create, int options) {
-    if (strcmp_static(type, URI_TYPE_FILE))
+    if (strcmp(type, URI_TYPE_FILE))
         return -PAL_ERROR_INVAL;
 
     /* prepare the file handle */
@@ -45,7 +42,7 @@ static int file_open(PAL_HANDLE* handle, const char* type, const char* uri, int 
     char* path = (void*)hdl + HANDLE_SIZE(file);
     int ret;
     if ((ret = get_norm_path(uri, path, &len)) < 0) {
-        SGX_DBG(DBG_E, "Could not normalize path (%s): %s\n", uri, pal_strerror(ret));
+        SGX_DBG(DBG_E, "Could not normalize path (%s): %s\n", uri, pal_strerror(-ret));
         free(hdl);
         return ret;
     }
@@ -122,7 +119,7 @@ static int file_open(PAL_HANDLE* handle, const char* type, const char* uri, int 
         if (ret < 0) {
             SGX_DBG(DBG_E, "Accessing file:%s is denied (%s). This file is not trusted or allowed."
                     " Trusted files should be regular files (seekable).\n", hdl->file.realpath,
-                    pal_strerror(ret));
+                    pal_strerror(-ret));
             goto out;
         }
 
@@ -587,7 +584,7 @@ static int pf_file_attrquery(struct protected_file* pf, int fd_from_attrquery, c
 
 /* 'attrquery' operation for file streams */
 static int file_attrquery(const char* type, const char* uri, PAL_STREAM_ATTR* attr) {
-    if (strcmp_static(type, URI_TYPE_FILE) && strcmp_static(type, URI_TYPE_DIR))
+    if (strcmp(type, URI_TYPE_FILE) && strcmp(type, URI_TYPE_DIR))
         return -PAL_ERROR_INVAL;
 
     /* open the file with O_NONBLOCK to avoid blocking the current thread if it is actually a FIFO
@@ -611,7 +608,7 @@ static int file_attrquery(const char* type, const char* uri, PAL_STREAM_ATTR* at
     size_t len = URI_MAX;
     ret = get_norm_path(uri, path, &len);
     if (ret < 0) {
-        SGX_DBG(DBG_E, "Could not normalize path (%s): %s\n", uri, pal_strerror(ret));
+        SGX_DBG(DBG_E, "Could not normalize path (%s): %s\n", uri, pal_strerror(-ret));
         goto out;
     }
 
@@ -673,7 +670,7 @@ static int file_attrquerybyhdl(PAL_HANDLE handle, PAL_STREAM_ATTR* attr) {
 
 static int file_attrsetbyhdl(PAL_HANDLE handle, PAL_STREAM_ATTR* attr) {
     int fd  = handle->file.fd;
-    int ret = ocall_fchmod(fd, attr->share_flags | 0600);
+    int ret = ocall_fchmod(fd, attr->share_flags | PERM_rw_______);
     if (IS_ERR(ret))
         return unix_to_pal_error(ERRNO(ret));
 
@@ -681,7 +678,7 @@ static int file_attrsetbyhdl(PAL_HANDLE handle, PAL_STREAM_ATTR* attr) {
 }
 
 static int file_rename(PAL_HANDLE handle, const char* type, const char* uri) {
-    if (strcmp_static(type, URI_TYPE_FILE))
+    if (strcmp(type, URI_TYPE_FILE))
         return -PAL_ERROR_INVAL;
 
     char* tmp = strdup(uri);
@@ -743,7 +740,7 @@ struct handle_ops g_file_ops = {
    ended with slashes. dir_open will be called by file_open. */
 static int dir_open(PAL_HANDLE* handle, const char* type, const char* uri, int access, int share,
                     int create, int options) {
-    if (strcmp_static(type, URI_TYPE_DIR))
+    if (strcmp(type, URI_TYPE_DIR))
         return -PAL_ERROR_INVAL;
     if (!WITHIN_MASK(access, PAL_ACCESS_MASK))
         return -PAL_ERROR_INVAL;
@@ -898,7 +895,7 @@ static int dir_delete(PAL_HANDLE handle, int access) {
 }
 
 static int dir_rename(PAL_HANDLE handle, const char* type, const char* uri) {
-    if (strcmp_static(type, URI_TYPE_DIR))
+    if (strcmp(type, URI_TYPE_DIR))
         return -PAL_ERROR_INVAL;
 
     char* tmp = strdup(uri);

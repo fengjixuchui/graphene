@@ -2,9 +2,7 @@
 /* Copyright (C) 2014 Stony Brook University */
 
 /*
- * shim_wrapper.c
- *
- * Implementation of system call "readv" and "writev".
+ * Implementation of system calls "readv" and "writev".
  */
 
 #include <errno.h>
@@ -23,7 +21,7 @@ ssize_t shim_do_readv(int fd, const struct iovec* vec, int vlen) {
 
     for (int i = 0; i < vlen; i++) {
         if (vec[i].iov_base) {
-            if (vec[i].iov_base + vec[i].iov_len <= vec[i].iov_base)
+            if (!access_ok(vec[i].iov_base, vec[i].iov_len))
                 return -EINVAL;
             if (test_user_memory(vec[i].iov_base, vec[i].iov_len, true))
                 return -EFAULT;
@@ -85,7 +83,7 @@ ssize_t shim_do_writev(int fd, const struct iovec* vec, int vlen) {
 
     for (int i = 0; i < vlen; i++) {
         if (vec[i].iov_base) {
-            if (vec[i].iov_base + vec[i].iov_len < vec[i].iov_base)
+            if (!access_ok(vec[i].iov_base, vec[i].iov_len))
                 return -EINVAL;
             if (test_user_memory(vec[i].iov_base, vec[i].iov_len, false))
                 return -EFAULT;

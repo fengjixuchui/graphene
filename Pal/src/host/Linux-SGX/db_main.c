@@ -2,10 +2,8 @@
 /* Copyright (C) 2014 Stony Brook University */
 
 /*
- * db_main.c
- *
- * This file contains the main function of the PAL loader, which loads and
- * processes environment, arguments and manifest.
+ * This file contains the main function of the PAL loader, which loads and processes environment,
+ * arguments and manifest.
  */
 
 #include <asm/errno.h>
@@ -28,6 +26,7 @@
 #include "pal_security.h"
 #include "protected_files.h"
 #include "sysdeps/generic/ldsodefs.h"
+#include "toml.h"
 
 #define RTLD_BOOTSTRAP
 #define _ENTRY enclave_entry
@@ -36,6 +35,11 @@ struct pal_linux_state g_linux_state;
 struct pal_sec g_pal_sec;
 
 PAL_SESSION_KEY g_master_key = {0};
+
+/* for internal PAL objects, Graphene first uses pre-allocated g_mem_pool and then falls back to
+ * _DkVirtualMemoryAlloc(PAL_ALLOC_INTERNAL); the amount of available PAL internal memory is
+ * limited by the variable below */
+size_t g_pal_internal_mem_size = 0;
 
 size_t g_page_size = PRESET_PAGESIZE;
 
@@ -47,10 +51,12 @@ void _DkGetAvailableUserAddressRange(PAL_PTR* start, PAL_PTR* end) {
     *start = (PAL_PTR)g_pal_sec.heap_min;
     *end   = (PAL_PTR)get_enclave_heap_top();
 
-    /* FIXME: hack to keep some heap for internal PAL objects allocated at runtime (recall that
-     * LibOS does not keep track of PAL memory, so without this hack it could overwrite internal
-     * PAL memory). This hack is probabilistic and brittle. */
-    *end = SATURATED_P_SUB(*end, 2 * 1024 * g_page_size, *start); /* 8MB reserved for PAL stuff */
+    /* Keep some heap for internal PAL objects allocated at runtime (recall that LibOS does not keep
+     * track of PAL memory, so without this limit it could overwrite internal PAL memory). This
+     * relies on the fact that our memory management allocates memory from higher addresses to lower
+     * addresses (see also enclave_pages.c). */
+    *end = SATURATED_P_SUB(*end, g_pal_internal_mem_size, *start);
+
     if (*end <= *start) {
         SGX_DBG(DBG_E, "Not enough enclave memory, please increase enclave size!\n");
         ocall_exit(1, /*is_exitgroup=*/true);
@@ -59,10 +65,6 @@ void _DkGetAvailableUserAddressRange(PAL_PTR* start, PAL_PTR* end) {
 
 PAL_NUM _DkGetProcessId(void) {
     return g_linux_state.process_id;
-}
-
-PAL_NUM _DkGetHostId(void) {
-    return 0;
 }
 
 #include "dynamic_link.h"
@@ -77,7 +79,7 @@ static struct link_map g_pal_map;
  * fail.
  */
 static PAL_HANDLE setup_dummy_file_handle(const char* name) {
-    if (!strstartswith_static(name, URI_PREFIX_FILE))
+    if (!strstartswith(name, URI_PREFIX_FILE))
         return NULL;
 
     name += URI_PREFIX_FILE_LEN;
@@ -100,12 +102,6 @@ static PAL_HANDLE setup_dummy_file_handle(const char* name) {
     handle->file.stubs = NULL;
 
     return handle;
-}
-
-static bool loader_filter(const char* key, size_t len) {
-    // beware: `key` may not be NUL-terminated!
-    return (len >= strlen("loader.") && !memcmp(key, "loader.", strlen("loader.")))
-        || (len >= strlen("sgx.") && !memcmp(key, "sgx.", strlen("sgx.")));
 }
 
 /*
@@ -193,6 +189,10 @@ noreturn void pal_linux_main(char* uptr_libpal_uri, size_t libpal_uri_len, char*
         ocall_exit(1, /*is_exitgroup=*/true);
     }
 
+    /* Initialize alloc_align as early as possible, a lot of PAL APIs depend on this being set. */
+    g_pal_state.alloc_align = _DkGetAllocationAlignment();
+    assert(IS_POWER_OF_2(g_pal_state.alloc_align));
+
     struct pal_sec sec_info;
     if (!sgx_copy_to_enclave(&sec_info, sizeof(sec_info), uptr_sec_info, sizeof(*uptr_sec_info))) {
         SGX_DBG(DBG_E, "Copying sec_info into the enclave failed\n");
@@ -240,9 +240,6 @@ noreturn void pal_linux_main(char* uptr_libpal_uri, size_t libpal_uri_len, char*
     COPY_ARRAY(g_pal_sec.exec_name, sec_info.exec_name);
     g_pal_sec.exec_name[sizeof(g_pal_sec.exec_name) - 1] = '\0';
 
-    COPY_ARRAY(g_pal_sec.manifest_name, sec_info.manifest_name);
-    g_pal_sec.manifest_name[sizeof(g_pal_sec.manifest_name) - 1] = '\0';
-
     g_pal_sec.stream_fd = sec_info.stream_fd;
 
     COPY_ARRAY(g_pal_sec.pipe_prefix, sec_info.pipe_prefix);
@@ -279,13 +276,20 @@ noreturn void pal_linux_main(char* uptr_libpal_uri, size_t libpal_uri_len, char*
     g_pal_sec.uid = sec_info.uid;
     g_pal_sec.gid = sec_info.gid;
 
-    int num_cpus = sec_info.num_cpus;
-    if (num_cpus >= 1 && num_cpus <= (1 << 16)) {
-        g_pal_sec.num_cpus = num_cpus;
+    int online_logical_cores = sec_info.online_logical_cores;
+    if (online_logical_cores >= 1 && online_logical_cores <= (1 << 16)) {
+        g_pal_sec.online_logical_cores = online_logical_cores;
     } else {
-        SGX_DBG(DBG_E, "Invalid sec_info.num_cpus: %d\n", num_cpus);
+        SGX_DBG(DBG_E, "Invalid sec_info.online_logical_cores: %d\n", online_logical_cores);
         ocall_exit(1, /*is_exitgroup=*/true);
     }
+
+    if (sec_info.physical_cores_per_socket <= 0) {
+        SGX_DBG(DBG_E, "Invalid sec_info.physical_cores_per_socket: %ld\n",
+                sec_info.physical_cores_per_socket);
+        ocall_exit(1, /*is_exitgroup=*/true);
+    }
+    g_pal_sec.physical_cores_per_socket = sec_info.physical_cores_per_socket;
 
     /* set up page allocator and slab manager */
     init_slab_mgr(g_page_size);
@@ -298,9 +302,6 @@ noreturn void pal_linux_main(char* uptr_libpal_uri, size_t libpal_uri_len, char*
 
     /* now we can add a link map for PAL itself */
     setup_pal_map(&g_pal_map);
-
-    /* Set the alignment early */
-    g_pal_state.alloc_align = g_page_size;
 
     /* initialize enclave properties */
     rv = init_enclave();
@@ -332,6 +333,20 @@ noreturn void pal_linux_main(char* uptr_libpal_uri, size_t libpal_uri_len, char*
 
     SET_ENCLAVE_TLS(ready_for_exceptions, 1UL);
 
+    /* Allocate enclave memory to store "logical core -> socket" mappings */
+    int* cpu_socket = (int*)malloc(online_logical_cores * sizeof(int));
+    if (!cpu_socket) {
+        SGX_DBG(DBG_E, "Allocation for logical core -> socket mappings failed\n");
+        ocall_exit(1, /*is_exitgroup=*/true);
+    }
+
+    if (!sgx_copy_to_enclave(cpu_socket, online_logical_cores * sizeof(int), sec_info.cpu_socket,
+                             online_logical_cores * sizeof(int))) {
+        SGX_DBG(DBG_E, "Copying cpu_socket into the enclave failed\n");
+        ocall_exit(1, /*is_exitgroup=*/true);
+    }
+    g_pal_sec.cpu_socket = cpu_socket;
+
     /* initialize master key (used for pipes' encryption for all enclaves of an application); it
      * will be overwritten below in init_child_process() with inherited-from-parent master key if
      * this enclave is child */
@@ -358,35 +373,35 @@ noreturn void pal_linux_main(char* uptr_libpal_uri, size_t libpal_uri_len, char*
      * read anything.
      */
 
-    PAL_HANDLE manifest, exec = NULL;
+    PAL_HANDLE exec = NULL;
 
-    manifest = setup_dummy_file_handle(g_pal_sec.manifest_name);
-
-    if (g_pal_sec.exec_name[0] != '\0') {
-        exec = setup_dummy_file_handle(g_pal_sec.exec_name);
-    } else {
-        SGX_DBG(DBG_I, "Run without executable\n");
-    }
+    exec = setup_dummy_file_handle(g_pal_sec.exec_name);
 
     uint64_t manifest_size = GET_ENCLAVE_TLS(manifest_size);
     void* manifest_addr = g_enclave_top - ALIGN_UP_PTR_POW2(manifest_size, g_page_size);
 
-    /* parse manifest data into config storage */
-    struct config_store* root_config = malloc(sizeof(struct config_store));
-    root_config->raw_data = manifest_addr;
-    root_config->raw_size = manifest_size;
-    root_config->malloc   = malloc;
-    root_config->free     = free;
-
-    const char* errstring = NULL;
-    if ((rv = read_config(root_config, loader_filter, &errstring)) < 0) {
-        SGX_DBG(DBG_E, "Can't read manifest: %s, error code %d\n", errstring, rv);
-        ocall_exit(1, /*is_exitgroup=*/true);
-    }
-
-    g_pal_state.root_config = root_config;
     g_pal_control.manifest_preload.start = (PAL_PTR)manifest_addr;
     g_pal_control.manifest_preload.end   = (PAL_PTR)manifest_addr + manifest_size;
+
+    /* parse manifest */
+    char errbuf[256];
+    toml_table_t* manifest_root = toml_parse(manifest_addr, errbuf, sizeof(errbuf));
+    if (!manifest_root) {
+        SGX_DBG(DBG_E, "PAL failed at parsing the manifest: %s\n"
+                "  Graphene switched to the TOML format recently, please update the manifest\n"
+                "  (in particular, string values must be put in double quotes)\n", errbuf);
+        ocall_exit(1, /*is_exitgroup=*/true);
+    }
+    g_pal_state.raw_manifest_data = manifest_addr;
+    g_pal_state.manifest_root = manifest_root;
+
+    ret = toml_sizestring_in(g_pal_state.manifest_root, "loader.pal_internal_mem_size",
+                             /*defaultval=*/0, &g_pal_internal_mem_size);
+    if (ret < 0) {
+        SGX_DBG(DBG_E, "Cannot parse \'loader.pal_internal_mem_size\' "
+                       "(the value must be put in double quotes!)\n");
+        ocall_exit(1, true);
+    }
 
     if ((rv = init_trusted_files()) < 0) {
         SGX_DBG(DBG_E, "Failed to load the checksums of trusted files: %d\n", rv);
@@ -423,10 +438,12 @@ noreturn void pal_linux_main(char* uptr_libpal_uri, size_t libpal_uri_len, char*
     PAL_HANDLE first_thread = malloc(HANDLE_SIZE(thread));
     SET_HANDLE_TYPE(first_thread, thread);
     first_thread->thread.tcs = g_enclave_base + GET_ENCLAVE_TLS(tcs_offset);
+    /* child threads are assigned TIDs 2,3,...; see pal_start_thread() */
+    first_thread->thread.tid = 1;
     g_pal_control.first_thread = first_thread;
     SET_ENCLAVE_TLS(thread, &first_thread->thread);
 
     /* call main function */
-    pal_main(g_pal_sec.instance_id, manifest, exec, g_pal_sec.exec_addr, parent, first_thread,
-             arguments, environments);
+    pal_main(g_pal_sec.instance_id, exec, g_pal_sec.exec_addr, parent, first_thread, arguments,
+             environments);
 }

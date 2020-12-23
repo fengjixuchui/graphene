@@ -7,15 +7,16 @@
 
 #include <asm/fcntl.h>
 #include <linux/fcntl.h>
-#include <linux/stat.h>
 #include <stdbool.h>
 
 #include "pal.h"
 #include "shim_fs.h"
 #include "shim_handle.h"
 #include "shim_internal.h"
-#include "shim_thread.h"
+#include "shim_lock.h"
+#include "shim_process.h"
 #include "shim_utils.h"
+#include "stat.h"
 
 /* Advances a char pointer (string) past any repeated slashes and returns the result.
  * Must be a null-terminated string. */
@@ -228,6 +229,12 @@ out:
  * manifest.
  *
  * If the file isn't found, returns -ENOENT.
+ * FIXME: path_lookupat() abuses -ENOENT for two cases:
+ *        - actual failure: one of the subdirs was not found, i.e., the file
+ *          cannot be created at all (and then dent is set to NULL);
+ *        - benign failure: all subdirs are found but the file doesn't exist,
+ *          i.e., the file can be created (and then dent is set to object).
+ *        This is terrible semantics and must be fixed when FS is re-worked.
  *
  * If the LOOKUP_DIRECTORY flag is set, and the found file isn't a directory,
  *  returns -ENOTDIR.
@@ -245,35 +252,37 @@ int __path_lookupat(struct shim_dentry* start, const char* path, int flags,
     int my_pathlen = 0;
     int err = 0;
     struct shim_dentry* my_dent = NULL;
-    struct shim_qstr this = QSTR_INIT;
+    struct shim_qstr link_target = QSTR_INIT;
     bool leaf_case = false; // Leaf call in case of recursion
     bool no_start = false; // start not passed
     bool no_fs = false; // fs not passed
-    struct shim_thread* cur_thread = get_cur_thread();
 
-    if (cur_thread && *path == '/') {
+    if (*path == '/') {
         /*
          * Allow (start != NULL, absolute path) for *at() system calls.
          * which are common case as normal namei path resolution.
          */
-        start = cur_thread->root;
-        no_start = true;
-        get_dentry(start);
-        fs = NULL;
+        lock(&g_process.fs_lock);
+        if (g_process.root) {
+            start = g_process.root;
+            get_dentry(start);
+            no_start = true;
+            fs = NULL;
+        }
+        unlock(&g_process.fs_lock);
     }
     if (!start) {
-        if (cur_thread) {
-            start = cur_thread->cwd;
-        } else {
+        lock(&g_process.fs_lock);
+        start = g_process.cwd;
+        if (!start) {
             /* Start at the global root if we have no fs and no start dentry.
              * This should only happen as part of initialization.
              */
             start = dentry_root;
-            assert(start);
         }
-        no_start = true;
-        // refcount should only be incremented if the caller didn't do it
         get_dentry(start);
+        unlock(&g_process.fs_lock);
+        no_start = true;
         assert(fs == NULL);
     }
 
@@ -354,29 +363,25 @@ int __path_lookupat(struct shim_dentry* start, const char* path, int flags,
 
                 assert(my_dent->fs->d_ops && my_dent->fs->d_ops->follow_link);
 
-                if ((err = my_dent->fs->d_ops->follow_link(my_dent, &this)) < 0)
+                if ((err = my_dent->fs->d_ops->follow_link(my_dent, &link_target)) < 0)
                     goto out;
 
-                path = qstrgetstr(&this);
+                /* let's re-start lookup & recursion with the link's target */
+                my_path = qstrgetstr(&link_target);
 
-                if (path) {
+                if (my_path) {
                     /* symlink name starts with a slash, restart lookup at root */
-                    if (*path == '/') {
-                        struct shim_dentry* root;
-                        // not sure how to deal with this case if cur_thread isn't defined
-                        assert(cur_thread);
-
-                        /* FIXME: below logic assumes that target file is under chroot; this misses
-                         *        cases like `/dev/stdin` which is a link to `/proc/self/fd/0`
-                         *        (i.e., Graphene currently fails if target is under pseudo-FS) */
-                        root = cur_thread->root;
-
+                    if (*my_path == '/') {
                         /*XXX: Check out path_reacquire here? */
                         // my_dent's refcount was incremented by lookup_dentry above,
                         // we need to not leak it here
                         put_dentry(my_dent);
-                        my_dent = root;
+                        lock(&g_process.fs_lock);
+                        my_dent = g_process.root;
+                        // not sure how to deal with this case if `g_process.root` isn't defined
+                        assert(my_dent);
                         get_dentry(my_dent);
+                        unlock(&g_process.fs_lock);
                     } else {
                         // Relative path, stay in this dir
                         put_dentry(my_dent);
@@ -410,13 +415,9 @@ int __path_lookupat(struct shim_dentry* start, const char* path, int flags,
             get_mount(my_dent->fs);
             err = __path_lookupat(my_dent, my_path, flags, dent, link_depth, my_dent->fs,
                                   make_ancestor);
+            put_mount(my_dent->fs);
             if (err < 0)
                 goto out;
-            /* If we aren't returning a live reference to the target dentry, go
-             * ahead and release the ref count when we unwind the recursion.
-             */
-            put_mount(my_dent->fs);
-            put_dentry(my_dent);
         } else {
             /* If make_ancestor is set, we also need to handle the case here */
             if (make_ancestor && (my_dent->state & DENTRY_NEGATIVE)) {
@@ -432,8 +433,10 @@ int __path_lookupat(struct shim_dentry* start, const char* path, int flags,
 
     /* Base case.  Set dent and return. */
     if (leaf_case) {
-        if (dent)
+        if (dent) {
+            get_dentry(my_dent);
             *dent = my_dent;
+        }
 
         // Enforce LOOKUP_CREATE flag at a higher level
         if (my_dent->state & DENTRY_NEGATIVE) {
@@ -447,6 +450,10 @@ int __path_lookupat(struct shim_dentry* start, const char* path, int flags,
     }
 
 out:
+    if (my_dent) {
+        put_dentry(my_dent);
+    }
+
     /* If we didn't have a start dentry, decrement the ref count here */
     if (no_start)
         put_dentry(start);
@@ -454,7 +461,7 @@ out:
     if (no_fs)
         put_mount(fs);
 
-    qstrfree(&this);
+    qstrfree(&link_target);
     return err;
 }
 
@@ -573,8 +580,11 @@ int open_namei(struct shim_handle* hdl, struct shim_dentry* start, const char* p
         err = dentry_open(hdl, mydent, flags);
 
 out:
-    if (dent && !err)
+    if (dent && !err) {
         *dent = mydent;
+    } else if (mydent) {
+        put_dentry(mydent);
+    }
 
     unlock(&dcache_lock);
 
@@ -736,15 +746,18 @@ int list_directory_dentry(struct shim_dentry* dent) {
             }
         }
 
-        if (child->state & DENTRY_NEGATIVE)
+        if (child->state & DENTRY_NEGATIVE) {
+            put_dentry(child);
             continue;
+        }
 
         if (!(child->state & DENTRY_VALID)) {
-            set_dirent_type(&child->type, d->type);
             child->state |= DENTRY_VALID | DENTRY_RECENTLY;
         }
 
+        set_dirent_type(&child->type, d->type);
         child->ino = d->ino;
+        put_dentry(child);
     }
 
     /* Once DENTRY_LISTED is set, the ino of the newly created file will not be updated, so its
@@ -814,9 +827,10 @@ int list_directory_handle(struct shim_dentry* dent, struct shim_handle* hdl) {
 
 int get_dirfd_dentry(int dirfd, struct shim_dentry** dir) {
     if (dirfd == AT_FDCWD) {
-        struct shim_thread* cur = get_cur_thread();
-        get_dentry(cur->cwd);
-        *dir = cur->cwd;
+        lock(&g_process.fs_lock);
+        *dir = g_process.cwd;
+        get_dentry(*dir);
+        unlock(&g_process.fs_lock);
         return 0;
     }
 

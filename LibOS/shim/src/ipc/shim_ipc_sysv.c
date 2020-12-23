@@ -2,8 +2,6 @@
 /* Copyright (C) 2014 Stony Brook University */
 
 /*
- * shim_ipc_pid.c
- *
  * This file contains functions and callbacks to handle IPC of SYSV namespace.
  */
 
@@ -34,7 +32,7 @@ int ipc_sysv_findkey_send(struct sysv_key* key) {
     if ((ret = connect_ns(&dest, &port)) < 0)
         goto out;
 
-    if (dest == cur_process.vmid) {
+    if (dest == g_process_ipc_info.vmid) {
         ret = -ENOENT;
         goto out;
     }
@@ -83,7 +81,7 @@ int ipc_sysv_tellkey_send(struct shim_ipc_port* port, IDTYPE dest, struct sysv_k
         if ((ret = connect_ns(&dest, &port)) < 0)
             goto out;
 
-        if (dest == cur_process.vmid)
+        if (dest == g_process_ipc_info.vmid)
             goto out;
 
         owned = false;
@@ -227,8 +225,8 @@ out:
     return ret;
 }
 
-int ipc_sysv_movres_send(struct sysv_client* client, IDTYPE owner, const char* uri, LEASETYPE lease,
-                         IDTYPE resid, enum sysv_type type) {
+int ipc_sysv_movres_send(struct sysv_client* client, IDTYPE owner, const char* uri, IDTYPE resid,
+                         enum sysv_type type) {
     int len = strlen(uri);
 
     size_t total_msg_size    = get_ipc_msg_size(sizeof(struct shim_ipc_sysv_movres) + len);
@@ -238,7 +236,6 @@ int ipc_sysv_movres_send(struct sysv_client* client, IDTYPE owner, const char* u
     msgin->resid                       = resid;
     msgin->type                        = type;
     msgin->owner                       = owner;
-    msgin->lease                       = lease;
     memcpy(msgin->uri, uri, len + 1);
     msg->seq = client->seq;
 
@@ -269,7 +266,7 @@ int ipc_sysv_movres_callback(struct shim_ipc_msg* msg, struct shim_ipc_port* por
             goto out;
     }
 
-    add_ipc_subrange(msgin->resid, msgin->owner, msgin->uri, &msgin->lease);
+    add_ipc_subrange(msgin->resid, msgin->owner, msgin->uri);
 
     if (obj->thread)
         thread_wakeup(obj->thread);
@@ -364,7 +361,7 @@ int ipc_sysv_msgrcv_send(IDTYPE msgid, long msgtype, int flags, void* buf, size_
     if ((ret = connect_owner(msgid, &port, &owner)) < 0)
         goto out;
 
-    if (owner == cur_process.vmid) {
+    if (owner == g_process_ipc_info.vmid) {
         ret = -EAGAIN;
         goto out;
     }
@@ -438,7 +435,7 @@ int ipc_sysv_semop_send(IDTYPE semid, struct sembuf* sops, int nsops, unsigned l
     if ((ret = connect_owner(semid, &port, &owner)) < 0)
         goto out;
 
-    if (owner == cur_process.vmid) {
+    if (owner == g_process_ipc_info.vmid) {
         ret = -EAGAIN;
         goto out;
     }

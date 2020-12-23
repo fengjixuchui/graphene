@@ -262,6 +262,15 @@ static void ocall_munmap_untrusted_cache(void* mem, size_t size, bool need_munma
 int ocall_cpuid(unsigned int leaf, unsigned int subleaf, unsigned int values[4]) {
     int retval = 0;
     ms_ocall_cpuid_t* ms;
+    bool bypass_exitless = false;
+
+    /* the cpu topology info must be retrieved in the context of current thread
+     * rather than rpc thread in case exitless feature is enabled.
+     */
+    if (leaf == CPUID_EXT_TOPOLOGY_ENUMERATION_LEAF ||
+        leaf == CPUID_V2EXT_TOPOLOGY_ENUMERATION_LEAF) {
+        bypass_exitless = true;
+    }
 
     void* old_ustack = sgx_prepare_ustack();
     ms = sgx_alloc_on_ustack_aligned(sizeof(*ms), alignof(*ms));
@@ -273,7 +282,7 @@ int ocall_cpuid(unsigned int leaf, unsigned int subleaf, unsigned int values[4])
     WRITE_ONCE(ms->ms_leaf, leaf);
     WRITE_ONCE(ms->ms_subleaf, subleaf);
 
-    retval = sgx_exitless_ocall(OCALL_CPUID, ms);
+    retval = bypass_exitless ? sgx_ocall(OCALL_CPUID, ms) : sgx_exitless_ocall(OCALL_CPUID, ms);
 
     if (!retval) {
         values[0] = READ_ONCE(ms->ms_values[0]);
@@ -288,7 +297,7 @@ int ocall_cpuid(unsigned int leaf, unsigned int subleaf, unsigned int values[4])
 
 int ocall_open(const char* pathname, int flags, unsigned short mode) {
     int retval = 0;
-    int len = pathname ? strlen(pathname) + 1 : 0;
+    size_t len = pathname ? strlen(pathname) + 1 : 0;
     ms_ocall_open_t* ms;
 
     void* old_ustack = sgx_prepare_ustack();
@@ -678,7 +687,7 @@ int ocall_ftruncate(int fd, uint64_t length) {
 
 int ocall_mkdir(const char* pathname, unsigned short mode) {
     int retval = 0;
-    int len = pathname ? strlen(pathname) + 1 : 0;
+    size_t len = pathname ? strlen(pathname) + 1 : 0;
     ms_ocall_mkdir_t* ms;
 
     void* old_ustack = sgx_prepare_ustack();
@@ -766,10 +775,10 @@ int ocall_clone_thread(void) {
     return sgx_exitless_ocall(OCALL_CLONE_THREAD, dummy);
 }
 
-int ocall_create_process(const char* uri, int nargs, const char** args, int* stream_fd,
+int ocall_create_process(const char* uri, size_t nargs, const char** args, int* stream_fd,
                          unsigned int* pid) {
     int retval = 0;
-    int ulen = uri ? strlen(uri) + 1 : 0;
+    size_t ulen = strlen(uri) + 1;
     ms_ocall_create_process_t* ms;
 
     void* old_ustack = sgx_prepare_ustack();
@@ -779,16 +788,16 @@ int ocall_create_process(const char* uri, int nargs, const char** args, int* str
         return -EPERM;
     }
 
-    void* untrusted_uri = uri ? sgx_copy_to_ustack(uri, ulen) : NULL;
-    if (uri && !untrusted_uri) {
+    void* untrusted_uri = sgx_copy_to_ustack(uri, ulen);
+    if (!untrusted_uri) {
         sgx_reset_ustack(old_ustack);
         return -EPERM;
     }
     WRITE_ONCE(ms->ms_uri, untrusted_uri);
 
     WRITE_ONCE(ms->ms_nargs, nargs);
-    for (int i = 0; i < nargs; i++) {
-        int len = args[i] ? strlen(args[i]) + 1 : 0;
+    for (size_t i = 0; i < nargs; i++) {
+        size_t len = args[i] ? strlen(args[i]) + 1 : 0;
         void* unstrusted_arg = args[i] ? sgx_copy_to_ustack(args[i], len) : NULL;
 
         if (args[i] && !unstrusted_arg) {
@@ -1331,7 +1340,7 @@ int ocall_rename(const char* oldpath, const char* newpath) {
 
 int ocall_delete(const char* pathname) {
     int retval = 0;
-    int len = pathname ? strlen(pathname) + 1 : 0;
+    size_t len = pathname ? strlen(pathname) + 1 : 0;
     ms_ocall_delete_t* ms;
 
     void* old_ustack = sgx_prepare_ustack();
@@ -1354,22 +1363,51 @@ int ocall_delete(const char* pathname) {
     return retval;
 }
 
-int ocall_load_debug(const char* command) {
+int ocall_update_debugger(struct debug_map* _Atomic* debug_map) {
     int retval = 0;
-    int len = strlen(command) + 1;
+    ms_ocall_update_debugger_t* ms;
 
     void* old_ustack = sgx_prepare_ustack();
-    const char* ms = sgx_copy_to_ustack(command, len);
+    ms = sgx_alloc_on_ustack_aligned(sizeof(*ms), alignof(*ms));
     if (!ms) {
         sgx_reset_ustack(old_ustack);
         return -EPERM;
     }
 
-    retval = sgx_exitless_ocall(OCALL_LOAD_DEBUG, (void*)ms);
+    WRITE_ONCE(ms->ms_debug_map, debug_map);
+    retval = sgx_exitless_ocall(OCALL_UPDATE_DEBUGGER, ms);
 
     sgx_reset_ustack(old_ustack);
     return retval;
 }
+
+int ocall_report_mmap(const char* filename, uint64_t addr, uint64_t len, uint64_t offset) {
+    int retval = 0;
+    size_t filename_len = filename ? strlen(filename) + 1 : 0;
+    ms_ocall_report_mmap_t* ms;
+
+    void* old_ustack = sgx_prepare_ustack();
+    ms = sgx_alloc_on_ustack_aligned(sizeof(*ms), alignof(*ms));
+    if (!ms) {
+        sgx_reset_ustack(old_ustack);
+        return -EPERM;
+    }
+    void* untrusted_filename = sgx_copy_to_ustack(filename, filename_len);
+    if (!untrusted_filename) {
+        sgx_reset_ustack(old_ustack);
+        return -EPERM;
+    }
+    WRITE_ONCE(ms->ms_filename, untrusted_filename);
+    WRITE_ONCE(ms->ms_addr, addr);
+    WRITE_ONCE(ms->ms_len, len);
+    WRITE_ONCE(ms->ms_offset, offset);
+
+    retval = sgx_exitless_ocall(OCALL_REPORT_MMAP, ms);
+
+    sgx_reset_ustack(old_ustack);
+    return retval;
+}
+
 
 int ocall_eventfd(unsigned int initval, int flags) {
     int retval = 0;
@@ -1404,7 +1442,14 @@ int ocall_get_quote(const sgx_spid_t* spid, bool linkable, const sgx_report_t* r
         goto out;
     }
 
-    memcpy(&ms->ms_spid, spid, sizeof(*spid));
+    if (spid) {
+        WRITE_ONCE(ms->ms_is_epid, true);
+        memcpy(&ms->ms_spid, spid, sizeof(*spid));
+    } else {
+        WRITE_ONCE(ms->ms_is_epid, false);
+        memset(&ms->ms_spid, 0, sizeof(ms->ms_spid)); /* for sanity */
+    }
+
     memcpy(&ms->ms_report, report, sizeof(*report));
     memcpy(&ms->ms_nonce, nonce, sizeof(*nonce));
     WRITE_ONCE(ms->ms_linkable, linkable);
@@ -1450,6 +1495,86 @@ int ocall_get_quote(const sgx_spid_t* spid, bool linkable, const sgx_report_t* r
 out:
     if (IS_ERR(retval))
         free(buf);
+    sgx_reset_ustack(old_ustack);
+    return retval;
+}
+
+int ocall_sched_setaffinity(void* tcs, size_t cpumask_size, void* cpu_mask) {
+    int retval = 0;
+    ms_ocall_sched_setaffinity_t* ms;
+
+    void* old_ustack = sgx_prepare_ustack();
+    ms = sgx_alloc_on_ustack_aligned(sizeof(*ms), alignof(*ms));
+    if (!ms) {
+        sgx_reset_ustack(old_ustack);
+        return -EPERM;
+    }
+
+    WRITE_ONCE(ms->ms_tcs, tcs);
+    WRITE_ONCE(ms->ms_cpumask_size, cpumask_size);
+    void* untrusted_cpu_mask = sgx_copy_to_ustack(cpu_mask, cpumask_size);
+    if (!untrusted_cpu_mask) {
+        sgx_reset_ustack(old_ustack);
+        return -EPERM;
+    }
+    WRITE_ONCE(ms->ms_cpu_mask, untrusted_cpu_mask);
+
+    retval = sgx_exitless_ocall(OCALL_SCHED_SETAFFINITY, ms);
+    if (IS_ERR(retval) && !IS_UNIX_ERR(retval))
+        retval = -EPERM;
+
+    sgx_reset_ustack(old_ustack);
+    return retval;
+}
+
+static bool is_cpumask_valid(void* cpu_mask, size_t cpumask_size) {
+    size_t max_cpumask_bits = cpumask_size * BITS_IN_BYTE;
+    size_t valid_cpumask_bits = g_pal_control.cpu_info.online_logical_cores;
+    size_t invalid_bits = max_cpumask_bits - valid_cpumask_bits;
+
+    if (invalid_bits == 0)
+        return true;
+
+    /* create an invalid cpu_mask bits */
+    unsigned long invalid_cpumask = SET_HIGHEST_N_BITS(unsigned long, invalid_bits);
+
+    /* Extract last 64bits to check if any invalid cpu bits are set */
+    int idx = (cpumask_size / sizeof(unsigned long)) - 1;
+    unsigned long cpumask = ((unsigned long*)cpu_mask)[idx];
+
+    return !(cpumask & invalid_cpumask);
+}
+
+int ocall_sched_getaffinity(void* tcs, size_t cpumask_size, void* cpu_mask) {
+    int retval = 0;
+    ms_ocall_sched_getaffinity_t* ms;
+
+    void* old_ustack = sgx_prepare_ustack();
+    ms = sgx_alloc_on_ustack_aligned(sizeof(*ms), alignof(*ms));
+    if (!ms) {
+        sgx_reset_ustack(old_ustack);
+        return -EPERM;
+    }
+
+    WRITE_ONCE(ms->ms_tcs, tcs);
+    WRITE_ONCE(ms->ms_cpumask_size, cpumask_size);
+    void* untrusted_cpu_mask = sgx_copy_to_ustack(cpu_mask, cpumask_size);
+    if (!untrusted_cpu_mask) {
+        sgx_reset_ustack(old_ustack);
+        return -EPERM;
+    }
+    WRITE_ONCE(ms->ms_cpu_mask, untrusted_cpu_mask);
+
+    retval = sgx_exitless_ocall(OCALL_SCHED_GETAFFINITY, ms);
+    if (IS_ERR(retval) && !IS_UNIX_ERR(retval))
+        retval = -EPERM;
+
+    if (retval > 0 && !sgx_copy_to_enclave(cpu_mask, cpumask_size, untrusted_cpu_mask, retval))
+        retval = -EPERM;
+
+    if (retval > 0 && !is_cpumask_valid(cpu_mask, cpumask_size))
+        retval = -EPERM;
+
     sgx_reset_ustack(old_ustack);
     return retval;
 }

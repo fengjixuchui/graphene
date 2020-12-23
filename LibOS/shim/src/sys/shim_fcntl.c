@@ -2,8 +2,6 @@
 /* Copyright (C) 2014 Stony Brook University */
 
 /*
- * shim_fcntl.c
- *
  * Implementation of system call "fcntl".
  */
 
@@ -15,6 +13,7 @@
 #include "shim_fs.h"
 #include "shim_handle.h"
 #include "shim_internal.h"
+#include "shim_lock.h"
 #include "shim_table.h"
 #include "shim_thread.h"
 #include "shim_utils.h"
@@ -40,7 +39,7 @@ int set_handle_nonblocking(struct shim_handle* hdl) {
 }
 
 int shim_do_fcntl(int fd, int cmd, unsigned long arg) {
-    struct shim_handle_map* handle_map = get_cur_handle_map(NULL);
+    struct shim_handle_map* handle_map = get_thread_handle_map(NULL);
     int flags;
     int ret = -ENOSYS;
 
@@ -56,15 +55,7 @@ int shim_do_fcntl(int fd, int cmd, unsigned long arg) {
          *   On success, the new descriptor is returned.
          */
         case F_DUPFD: {
-            int vfd = arg;
-
-            while (1) {
-                if (set_new_fd_handle_by_fd(vfd, hdl, flags, handle_map) == vfd)
-                    break;
-                vfd++;
-            };
-
-            ret = vfd;
+            ret = set_new_fd_handle_above_fd(arg, hdl, flags, handle_map);
             break;
         }
 
@@ -76,16 +67,8 @@ int shim_do_fcntl(int fd, int cmd, unsigned long arg) {
          *   useful, see the description of O_CLOEXEC in open(2).
          */
         case F_DUPFD_CLOEXEC: {
-            int vfd = arg;
             flags |= FD_CLOEXEC;
-
-            while (1) {
-                if (set_new_fd_handle_by_fd(vfd, hdl, flags, handle_map) == vfd)
-                    break;
-                vfd++;
-            };
-
-            ret = vfd;
+            ret = set_new_fd_handle_above_fd(arg, hdl, flags, handle_map);
             break;
         }
 

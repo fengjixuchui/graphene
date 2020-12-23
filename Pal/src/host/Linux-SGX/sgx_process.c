@@ -2,14 +2,11 @@
 /* Copyright (C) 2014 Stony Brook University */
 
 /*
- * db_process.c
- *
- * This source file contains functions to create a child process and terminate
- * the running process. Child does not inherit any objects or memory from its
- * parent pricess. A Parent process may not modify the execution of its
- * children. It can wait for a child to exit using its handle. Also, parent and
- * child may communicate through I/O streams provided by the parent to the child
- * at creation.
+ * This source file contains functions to create a child process and terminate the running process.
+ * Child does not inherit any objects or memory from its parent process. A parent process may not
+ * modify the execution of its children. It can wait for a child to exit using its handle. Also,
+ * parent and child may communicate through I/O streams provided by the parent to the child at
+ * creation.
  */
 
 #include <asm/errno.h>
@@ -31,6 +28,7 @@ struct proc_args {
     unsigned int parent_process_id;
     int          stream_fd;
     PAL_SEC_STR  pipe_prefix;
+    size_t       manifest_size; // manifest will follow this struct on the pipe.
 };
 
 /*
@@ -61,12 +59,10 @@ static int __attribute_noinline vfork_exec(int parent_stream, const char** argv)
     return 0;
 }
 
-int sgx_create_process(const char* uri, int nargs, const char** args, int* stream_fd) {
+int sgx_create_process(const char* uri, size_t nargs, const char** args, int* stream_fd,
+                       const char* manifest) {
     int ret, rete, child;
     int fds[2] = {-1, -1};
-
-    if (!uri || !strstartswith_static(uri, URI_PREFIX_FILE))
-        return -EINVAL;
 
     int socktype = SOCK_STREAM;
     if (IS_ERR((ret = INLINE_SYSCALL(socketpair, 4, AF_UNIX, socktype, 0, fds))))
@@ -111,17 +107,24 @@ int sgx_create_process(const char* uri, int nargs, const char** args, int* strea
     proc_args.instance_id       = pal_sec->instance_id;
     proc_args.parent_process_id = pal_sec->pid;
     proc_args.stream_fd         = fds[0];
+    proc_args.manifest_size     = strlen(manifest);
     memcpy(proc_args.pipe_prefix, pal_sec->pipe_prefix, sizeof(PAL_SEC_STR));
 
     ret = INLINE_SYSCALL(write, 3, fds[1], &proc_args, sizeof(struct proc_args));
-    if (IS_ERR(ret) || (size_t)ret < sizeof(struct proc_args)) {
-        ret = -EPERM;
+    if (IS_ERR(ret) || (size_t)ret != sizeof(struct proc_args)) {
+        ret = IS_ERR(ret) ? ret : -EINTR;
         goto out;
     }
 
-    ret = INLINE_SYSCALL(read, 3, fds[1], &rete, sizeof(int));
-    if (IS_ERR(ret) || (size_t)ret < sizeof(int)) {
-        ret = -EPERM;
+    ret = INLINE_SYSCALL(write, 3, fds[1], manifest, proc_args.manifest_size);
+    if (IS_ERR(ret) || (size_t)ret != proc_args.manifest_size) {
+        ret = IS_ERR(ret) ? ret : -EINTR;
+        goto out;
+    }
+
+    ret = INLINE_SYSCALL(read, 3, fds[1], &rete, sizeof(rete));
+    if (IS_ERR(ret) || (size_t)ret != sizeof(rete)) {
+        ret = IS_ERR(ret) ? ret : -EINTR;
         goto out;
     }
 
@@ -147,20 +150,37 @@ out:
     return ret;
 }
 
-int sgx_init_child_process(int parent_pipe_fd, struct pal_sec* pal_sec) {
+int sgx_init_child_process(int parent_pipe_fd, struct pal_sec* pal_sec, char** manifest_out) {
+    int ret;
     struct proc_args proc_args;
+    long bytes_read, bytes_written;
+    char* manifest = NULL;
 
-    int ret = INLINE_SYSCALL(read, 3, parent_pipe_fd, &proc_args, sizeof(struct proc_args));
-    if (IS_ERR(ret)) {
-        if (ERRNO(ret) == EBADF)
-            return 0;
-        return ret;
+    bytes_read = INLINE_SYSCALL(read, 3, parent_pipe_fd, &proc_args, sizeof(struct proc_args));
+    if (IS_ERR(bytes_read) || bytes_read != sizeof(struct proc_args)) {
+        ret = IS_ERR(bytes_read) ? bytes_read : -EINTR;
+        goto out;
     }
 
+    manifest = malloc(proc_args.manifest_size + 1);
+    if (!manifest) {
+        ret = -ENOMEM;
+        goto out;
+    }
+
+    bytes_read = INLINE_SYSCALL(read, 3, parent_pipe_fd, manifest, proc_args.manifest_size);
+    if (IS_ERR(bytes_read)) {
+        ret = IS_ERR(bytes_read) ? bytes_read : -EINTR;
+        goto out;
+    }
+    manifest[proc_args.manifest_size] = '\0';
+
     int child_status = 0;
-    ret = INLINE_SYSCALL(write, 3, parent_pipe_fd, &child_status, sizeof(int));
-    if (IS_ERR(ret))
-        return ret;
+    bytes_written = INLINE_SYSCALL(write, 3, parent_pipe_fd, &child_status, sizeof(int));
+    if (IS_ERR(bytes_written)) {
+        ret = IS_ERR(bytes_written) ? bytes_written : -EINTR;
+        goto out;
+    }
 
     memcpy(pal_sec->exec_name, proc_args.exec_name, sizeof(PAL_SEC_STR));
     pal_sec->instance_id = proc_args.instance_id;
@@ -168,5 +188,10 @@ int sgx_init_child_process(int parent_pipe_fd, struct pal_sec* pal_sec) {
     pal_sec->stream_fd   = proc_args.stream_fd;
     memcpy(pal_sec->pipe_prefix, proc_args.pipe_prefix, sizeof(PAL_SEC_STR));
 
-    return 1;
+    *manifest_out = manifest;
+    ret = 0;
+out:
+    if (ret < 0)
+        free(manifest);
+    return ret;
 }

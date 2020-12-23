@@ -85,6 +85,8 @@ void pal_tcb_urts_init(PAL_TCB_URTS* tcb, void* stack, void* alt_stack) {
     tcb->aex_cnt          = 0;
     tcb->sync_signal_cnt  = 0;
     tcb->async_signal_cnt = 0;
+
+    tcb->profile_sample_time = 0;
 }
 
 static spinlock_t tcs_lock = INIT_SPINLOCK_UNLOCKED;
@@ -222,22 +224,21 @@ noreturn void thread_exit(int status) {
 
     /* free the thread stack (via munmap) and exit; note that exit() needs a "status" arg
      * but it could be allocated on a stack, so we must put it in register and do asm */
-    __asm__ volatile("cmpq $0, %%rdi \n\t"     /* check if tcb->stack != NULL */
-                     "je 1f \n\t"
-                     "syscall \n\t"            /* all args are already prepared, call munmap */
-                     "1: \n\t"
-                     "movq %%rdx, %%rax \n\t"  /* prepare for exit: rax = __NR_exit */
-                     "movq %%rbx, %%rdi \n\t"  /* prepare for exit: rdi = status    */
-                     "syscall \n\t"            /* all args are prepared, call exit  */
-                     : /* no output regs since we don't return from exit */
-                     : "a"(__NR_munmap), "D"(tcb->stack), "S"(THREAD_STACK_SIZE + ALT_STACK_SIZE),
-                       "d"(__NR_exit), "b"(status)
-                     : "cc", "rcx", "r11", "memory"  /* syscall instr clobbers cc, rcx, and r11 */
+    __asm__ volatile("cmpq $0, %%rdi \n"        /* check if tcb->stack != NULL */
+                     "je 1f \n"
+                     "syscall \n"               /* all args are already prepared, call munmap */
+                     "1: \n"
+                     "mov %[nr_exit], %%rax \n"
+                     "mov %[exit_code], %%edi \n"
+                     "syscall \n"               /* all args are prepared, call exit  */
+                     "ud2 \n"
+                     "jmp 1b \n"
+                     :
+                     : "a" (__NR_munmap), "D" (tcb->stack), "S" (THREAD_STACK_SIZE + ALT_STACK_SIZE),
+                       [nr_exit] "i" (__NR_exit), [exit_code] "r" (status)
+                     : "memory", "rcx", "r11"
     );
-
-    while (true) {
-        /* nothing */
-    }
+    __builtin_unreachable();
 }
 
 int clone_thread(void) {
@@ -285,13 +286,13 @@ int clone_thread(void) {
     return 0;
 }
 
-int interrupt_thread(void* tcs) {
+int get_tid_from_tcs(void* tcs) {
     int index = (sgx_arch_tcs_t*)tcs - g_enclave_tcs;
     struct thread_map* map = &g_enclave_thread_map[index];
     if (index >= g_enclave_thread_num)
         return -EINVAL;
     if (!map->tid)
         return -EINVAL;
-    INLINE_SYSCALL(tgkill, 3, g_pal_enclave.pal_sec.pid, map->tid, SIGCONT);
-    return 0;
+
+    return map->tid;
 }

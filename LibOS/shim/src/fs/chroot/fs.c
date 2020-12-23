@@ -5,23 +5,23 @@
  * This file contains code for implementation of 'chroot' filesystem.
  */
 
-// FIXME: Sorting these includes causes a bunch of "error: ‘S_IFREG’ undeclared" errors.
-#include "shim_flags_conv.h"
-#include "shim_internal.h"
-#include "shim_thread.h"
-#include "shim_handle.h"
-#include "shim_vma.h"
-#include "shim_fs.h"
-#include "shim_utils.h"
-#include "pal.h"
-#include "pal_error.h"
-
 #include <asm/fcntl.h>
 #include <asm/mman.h>
 #include <asm/unistd.h>
 #include <errno.h>
 #include <linux/fcntl.h>
-#include <linux/stat.h>
+
+#include "pal.h"
+#include "pal_error.h"
+#include "shim_flags_conv.h"
+#include "shim_fs.h"
+#include "shim_handle.h"
+#include "shim_internal.h"
+#include "shim_lock.h"
+#include "shim_thread.h"
+#include "shim_utils.h"
+#include "shim_vma.h"
+#include "stat.h"
 
 #define URI_MAX_SIZE STR_SIZE
 
@@ -42,11 +42,11 @@ struct mount_data {
 static int chroot_mount(const char* uri, void** mount_data) {
     enum shim_file_type type;
 
-    if (strstartswith_static(uri, URI_PREFIX_FILE)) {
+    if (strstartswith(uri, URI_PREFIX_FILE)) {
         type = FILE_UNKNOWN;
         uri += 5;
-    } else if (strstartswith_static(uri, URI_PREFIX_DEV)) {
-        type = strstartswith_static(uri + static_strlen(URI_PREFIX_DEV), "tty")
+    } else if (strstartswith(uri, URI_PREFIX_DEV)) {
+        type = strstartswith(uri + static_strlen(URI_PREFIX_DEV), "tty")
                ? FILE_TTY
                : FILE_DEV;
         uri += 4;
@@ -711,12 +711,15 @@ static off_t chroot_seek(struct shim_handle* hdl, off_t offset, int wence) {
     struct shim_file_handle* file = &hdl->info.file;
     lock(&hdl->lock);
 
+    /* TODO: this function emulates lseek() completely inside the LibOS, but some device files
+     *       may report size == 0 during fstat() and may provide device-specific lseek() logic;
+     *       this emulation breaks for such device-specific cases */
     off_t marker = file->marker;
     off_t size = file->size;
 
     if (check_version(hdl)) {
         struct shim_file_data* data = FILE_HANDLE_DATA(hdl);
-        if (data->type != FILE_REGULAR) {
+        if (data->type != FILE_REGULAR && data->type != FILE_DEV) {
             ret = -ESPIPE;
             goto out;
         }
@@ -808,7 +811,7 @@ static int chroot_readdir(struct shim_dentry* dent, struct shim_dirent** dirent)
     chroot_update_ino(dent);
 
     const char* uri = qstrgetstr(&data->host_uri);
-    assert(strstartswith_static(uri, URI_PREFIX_DIR));
+    assert(strstartswith(uri, URI_PREFIX_DIR));
 
     pal_hdl = DkStreamOpen(uri, PAL_ACCESS_RDONLY, 0, 0, 0);
     if (!pal_hdl)

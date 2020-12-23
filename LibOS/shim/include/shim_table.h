@@ -373,7 +373,7 @@ int shim_do_sigaction(int signum, const struct __kernel_sigaction* act,
                       struct __kernel_sigaction* oldact, size_t sigsetsize);
 int shim_do_sigprocmask(int how, const __sigset_t* set, __sigset_t* oldset);
 int shim_do_sigreturn(int __unused);
-int shim_do_ioctl(int fd, unsigned long cmd, unsigned long arg);
+long shim_do_ioctl(unsigned int fd, unsigned int cmd, unsigned long arg);
 ssize_t shim_do_pread64(int fd, char* buf, size_t count, loff_t pos);
 ssize_t shim_do_pwrite64(int fd, char* buf, size_t count, loff_t pos);
 ssize_t shim_do_readv(int fd, const struct iovec* vec, int vlen);
@@ -386,6 +386,7 @@ int shim_do_sched_yield(void);
 void* shim_do_mremap(void* addr, size_t old_len, size_t new_len, int flags, void* new_addr);
 int shim_do_msync(void* start, size_t len, int flags);
 int shim_do_mincore(void* start, size_t len, unsigned char* vec);
+long shim_do_madvise(unsigned long start, size_t len_in, int behavior);
 int shim_do_dup(unsigned int fd);
 int shim_do_dup2(unsigned int oldfd, unsigned int newfd);
 int shim_do_pause(void);
@@ -413,10 +414,10 @@ int shim_do_getpeername(int sockfd, struct sockaddr* addr, int* addrlen);
 int shim_do_socketpair(int domain, int type, int protocol, int* sv);
 int shim_do_setsockopt(int fd, int level, int optname, char* optval, int optlen);
 int shim_do_getsockopt(int fd, int level, int optname, char* optval, int* optlen);
-int shim_do_clone(int flags, void* user_stack_addr, int* parent_tidptr, int* child_tidptr,
-                  void* tls);
-int shim_do_fork(void);
-int shim_do_vfork(void);
+long shim_do_clone(unsigned long flags, unsigned long user_stack_addr, int* parent_tidptr,
+                   int* child_tidptr, unsigned long tls);
+long shim_do_fork(void);
+long shim_do_vfork(void);
 int shim_do_execve(const char* file, const char** argv, const char** envp);
 noreturn int shim_do_exit(int error_code);
 long shim_do_waitid(int which, pid_t id, siginfo_t* infop, int options, struct __kernel_rusage* ru);
@@ -488,8 +489,8 @@ pid_t shim_do_gettid(void);
 int shim_do_tkill(int pid, int sig);
 time_t shim_do_time(time_t* tloc);
 int shim_do_futex(int* uaddr, int op, int val, void* utime, int* uaddr2, int val3);
-int shim_do_sched_setaffinity(pid_t pid, size_t len, __kernel_cpu_set_t* user_mask_ptr);
-int shim_do_sched_getaffinity(pid_t pid, size_t len, __kernel_cpu_set_t* user_mask_ptr);
+long shim_do_sched_setaffinity(pid_t pid, unsigned int cpumask_size, unsigned long* user_mask_ptr);
+long shim_do_sched_getaffinity(pid_t pid, unsigned int cpumask_size, unsigned long* user_mask_ptr);
 int shim_do_set_tid_address(int* tidptr);
 int shim_do_semtimedop(int semid, struct sembuf* sops, unsigned int nsops,
                        const struct timespec* timeout);
@@ -542,5 +543,19 @@ long shim_do_getrandom(char* buf, size_t count, unsigned int flags);
 #define GRND_NONBLOCK 0x0001
 #define GRND_RANDOM   0x0002
 #define GRND_INSECURE 0x0004
+
+#ifndef MADV_FREE
+#define MADV_FREE 8
+#endif
+#ifdef __x86_64__
+#ifndef MADV_WIPEONFORK
+#define MADV_WIPEONFORK 18
+#endif
+#ifndef MADV_KEEPONFORK
+#define MADV_KEEPONFORK 19
+#endif
+#else /* __x86_64__ */
+#error "Unsupported platform"
+#endif
 
 #endif /* _SHIM_TABLE_H_ */

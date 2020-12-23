@@ -2,17 +2,14 @@
 /* Copyright (C) 2014 Stony Brook University */
 
 /*
- * shim_fs.h
- *
  * Definitions of types and functions for file system bookkeeping.
  */
 
 #ifndef _SHIM_FS_H_
 #define _SHIM_FS_H_
 
-#define __KERNEL__
-#include <linux/stat.h>
 #include <stdbool.h>
+#include <asm/stat.h>
 
 #include "list.h"
 #include "pal.h"
@@ -125,14 +122,6 @@ struct shim_dentry {
     struct shim_mount* fs;     /* this dentry's mounted fs */
     struct shim_qstr rel_path; /* the path is relative to its mount point */
     struct shim_qstr name;     /* caching the file's name. */
-
-    /* DEP 6/16/17: For now, let's try not hashing; I suspect it is overkill for most purposes.
-     * I'll leave the field here for now, but propose we move to a per-directory table to accelerate
-     * lookups, rather than a global table, since this just supports one process.
-     */
-    LIST_TYPE(shim_dentry) hlist; /* to resolve collisions in the hash table */
-    LIST_TYPE(shim_dentry) list; /* put dentry to different list according to its availability, \
-                                  * persistent or freeable */
 
     struct shim_dentry* parent;
     int nchildren;
@@ -396,6 +385,8 @@ int list_directory_handle(struct shim_dentry* dent, struct shim_handle* hdl);
 void get_dentry(struct shim_dentry* dent);
 /* Decrement the reference count on dent */
 void put_dentry(struct shim_dentry* dent);
+/* Decrement the reference count by one and delete `dent` if this is the last reference. */
+void put_dentry_maybe_delete(struct shim_dentry* dent);
 
 /* Size of the path constructed by dentry_get_path(), including null terminator. */
 size_t dentry_get_path_size(struct shim_dentry* dent);
@@ -495,6 +486,15 @@ struct pseudo_name_ops {
     int (*match_name)(const char* name);
     int (*list_name)(const char* name, struct shim_dirent** buf, int count);
 };
+
+static inline dev_t makedev(unsigned int major, unsigned int minor) {
+    dev_t dev;
+    dev  = (((dev_t)(major & 0x00000fffu)) <<  8);
+    dev |= (((dev_t)(major & 0xfffff000u)) << 32);
+    dev |= (((dev_t)(minor & 0x000000ffu)) <<  0);
+    dev |= (((dev_t)(minor & 0xffffff00u)) << 12);
+    return dev;
+}
 
 struct pseudo_fs_ops {
     int (*open)(struct shim_handle* hdl, const char* name, int flags);

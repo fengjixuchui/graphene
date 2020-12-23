@@ -47,7 +47,6 @@ Table of Contents
    quickstart
    building
    manifest-syntax
-   perf-practices
    cloud-deployment
    sgx-intro
    glossary
@@ -74,8 +73,9 @@ Table of Contents
    devel/coding-style
    devel/setup
    devel/debugging
+   devel/benchmarks
+   devel/performance
    devel/new-syscall
-   devel/supported-syscalls
 
 .. toctree::
    :caption: LibOS

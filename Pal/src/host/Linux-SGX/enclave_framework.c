@@ -12,6 +12,7 @@
 #include "pal_linux_error.h"
 #include "pal_security.h"
 #include "spinlock.h"
+#include "toml.h"
 
 __sgx_mem_aligned struct pal_enclave_state g_pal_enclave_state;
 
@@ -36,13 +37,35 @@ bool sgx_is_completely_outside_enclave(const void* addr, size_t size) {
     return g_enclave_base >= addr + size || g_enclave_top <= addr;
 }
 
+/*
+ * When DEBUG is enabled, we run sgx_profile_sample() during asynchronous enclave exit (AEX), which
+ * uses the stack. Make sure to update URSP so that the AEX handler does not overwrite the part of
+ * the stack that we just allocated.
+ *
+ * (Recall that URSP is an outside stack pointer, saved by EENTER and restored on AEX by the SGX
+ * hardware itself.)
+ */
+#ifdef DEBUG
+
+#define UPDATE_USTACK(_ustack)                           \
+    do {                                                 \
+        SET_ENCLAVE_TLS(ustack, _ustack);                \
+        GET_ENCLAVE_TLS(gpr)->ursp = (uint64_t)_ustack;  \
+    } while(0)
+
+#else
+
+#define UPDATE_USTACK(_ustack) SET_ENCLAVE_TLS(ustack, _ustack)
+
+#endif
+
 void* sgx_prepare_ustack(void) {
     void* old_ustack = GET_ENCLAVE_TLS(ustack);
 
     void* ustack = old_ustack;
     if (ustack != GET_ENCLAVE_TLS(ustack_top))
         ustack -= RED_ZONE_SIZE;
-    SET_ENCLAVE_TLS(ustack, ustack);
+    UPDATE_USTACK(ustack);
 
     return old_ustack;
 }
@@ -54,7 +77,7 @@ void* sgx_alloc_on_ustack_aligned(size_t size, size_t alignment) {
     if (!sgx_is_completely_outside_enclave(ustack, size)) {
         return NULL;
     }
-    SET_ENCLAVE_TLS(ustack, ustack);
+    UPDATE_USTACK(ustack);
     return ustack;
 }
 
@@ -75,7 +98,7 @@ void* sgx_copy_to_ustack(const void* ptr, size_t size) {
 
 void sgx_reset_ustack(const void* old_ustack) {
     assert(old_ustack <= GET_ENCLAVE_TLS(ustack_top));
-    SET_ENCLAVE_TLS(ustack, old_ustack);
+    UPDATE_USTACK(old_ustack);
 }
 
 bool sgx_copy_ptr_to_enclave(void** ptr, void* uptr, size_t size) {
@@ -231,7 +254,6 @@ struct trusted_file {
 DEFINE_LISTP(trusted_file);
 static LISTP_TYPE(trusted_file) g_trusted_file_list = LISTP_INIT;
 static spinlock_t g_trusted_file_lock = INIT_SPINLOCK_UNLOCKED;
-static bool g_allow_file_creation = 0;
 static int g_file_check_policy = FILE_CHECK_POLICY_STRICT;
 
 /* Assumes `path` is normalized */
@@ -288,15 +310,14 @@ int load_trusted_file(PAL_HANDLE file, sgx_stub_t** stubptr, uint64_t* sizeptr, 
         return ret;
     }
 
-    /* Allow to create the file when g_allow_file_creation is turned on;
-       The created file is added to allowed_file list for later access */
-    if (create && g_allow_file_creation) {
+    /* always allow creating files */
+    if (create) {
         register_trusted_file(uri, NULL, /*check_duplicates=*/true);
         return 0;
     }
 
     /* Normalize the uri */
-    if (!strstartswith_static(uri, URI_PREFIX_FILE)) {
+    if (!strstartswith(uri, URI_PREFIX_FILE)) {
         SGX_DBG(DBG_E, "Invalid URI [%s]: Trusted files must start with 'file:'\n", uri);
         return -PAL_ERROR_INVAL;
     }
@@ -306,7 +327,7 @@ int load_trusted_file(PAL_HANDLE file, sgx_stub_t** stubptr, uint64_t* sizeptr, 
     ret = get_norm_path(uri + URI_PREFIX_FILE_LEN, normpath + URI_PREFIX_FILE_LEN, &len);
     if (ret < 0) {
         SGX_DBG(DBG_E, "Path (%s) normalization failed: %s\n", uri + URI_PREFIX_FILE_LEN,
-                pal_strerror(ret));
+                pal_strerror(-ret));
         return ret;
     }
     len += URI_PREFIX_FILE_LEN;
@@ -703,67 +724,69 @@ static int register_trusted_file(const char* uri, const char* checksum_str, bool
 }
 
 static int init_trusted_file(const char* key, const char* uri) {
-    char cskey[URI_MAX];
-    char* tmp;
-    char checksum[URI_MAX];
-    char normpath[URI_MAX];
+    int ret;
 
-    tmp = strcpy_static(cskey, "sgx.trusted_checksum.", URI_MAX);
-    memcpy(tmp, key, strlen(key) + 1);
+    /* read sgx.trusted_checksum.<key> entry from manifest */
+    char* fullkey = alloc_concat("sgx.trusted_checksum.", static_strlen("sgx.trusted_checksum."),
+                                 key, strlen(key));
+    if (!fullkey)
+        return -PAL_ERROR_NOMEM;
 
-    ssize_t ret = get_config(g_pal_state.root_config, cskey, checksum, sizeof(checksum));
-    if (ret < 0)
-        return 0;
-
-    /* Normalize the uri */
-    if (!strstartswith_static(uri, URI_PREFIX_FILE)) {
-        SGX_DBG(DBG_E, "Invalid URI [%s]: Trusted files must start with 'file:'\n", uri);
-        return -PAL_ERROR_INVAL;
-    }
-    static_assert(sizeof(normpath) > URI_PREFIX_FILE_LEN, "`normpath` is too small");
-    memcpy(normpath, URI_PREFIX_FILE, URI_PREFIX_FILE_LEN);
-    size_t len = sizeof(normpath) - URI_PREFIX_FILE_LEN;
-    ret = get_norm_path(uri + URI_PREFIX_FILE_LEN, normpath + URI_PREFIX_FILE_LEN, &len);
+    char* trusted_checksum = NULL;
+    ret = toml_string_in(g_pal_state.manifest_root, fullkey, &trusted_checksum);
     if (ret < 0) {
-        SGX_DBG(DBG_E, "Path (%s) normalization failed: %s\n", uri + URI_PREFIX_FILE_LEN,
-                pal_strerror(ret));
-        return ret;
-    }
-
-    return register_trusted_file(normpath, checksum, /*check_duplicates=*/false);
-}
-
-int init_trusted_files(void) {
-    struct config_store* store = g_pal_state.root_config;
-    char* cfgbuf = NULL;
-    ssize_t cfgsize;
-    int nuris, ret;
-    char key[CONFIG_MAX];
-    char uri[CONFIG_MAX];
-    char* k;
-    char* tmp;
-
-    if (g_pal_sec.exec_name[0] != '\0') {
-        ret = init_trusted_file("exec", g_pal_sec.exec_name);
-        if (ret < 0)
-            goto out;
-    }
-
-    cfgbuf = malloc(CONFIG_MAX);
-    if (!cfgbuf) {
-        ret = -PAL_ERROR_NOMEM;
+        SGX_DBG(DBG_E, "Cannot parse \'%s\' (the value must be put in double quotes!)\n", fullkey);
+        ret = -PAL_ERROR_INVAL;
         goto out;
     }
 
-    ssize_t len = get_config(store, "loader.preload", cfgbuf, CONFIG_MAX);
-    if (len > 0) {
+    /* Normalize the uri */
+    char normpath[URI_MAX] = URI_PREFIX_FILE;
+    if (!strstartswith(uri, URI_PREFIX_FILE)) {
+        SGX_DBG(DBG_E, "Invalid URI [%s]: Trusted files must start with 'file:'\n", uri);
+        ret = -PAL_ERROR_INVAL;
+        goto out;
+    }
+    size_t len = sizeof(normpath) - strlen(normpath);
+    ret = get_norm_path(uri + URI_PREFIX_FILE_LEN, normpath + URI_PREFIX_FILE_LEN, &len);
+    if (ret < 0) {
+        SGX_DBG(DBG_E, "Path (%s) normalization failed: %s\n", uri + URI_PREFIX_FILE_LEN,
+                pal_strerror(-ret));
+        goto out;
+    }
+
+    ret = register_trusted_file(normpath, trusted_checksum, /*check_duplicates=*/false);
+out:
+    free(trusted_checksum);
+    free(fullkey);
+    return ret;
+}
+
+int init_trusted_files(void) {
+    int ret;
+
+    ret = init_trusted_file("exec", g_pal_sec.exec_name);
+    if (ret < 0)
+        return ret;
+
+    /* read loader.preload string from manifest and register its files as trusted */
+    char* preload_str = NULL;
+    ret = toml_string_in(g_pal_state.manifest_root, "loader.preload", &preload_str);
+    if (ret < 0) {
+        SGX_DBG(DBG_E, "Cannot parse \'loader.preload\' "
+                       "(the value must be put in double quotes!)\n");
+        return -PAL_ERROR_INVAL;
+    }
+
+    if (preload_str) {
         int npreload = 0;
         char key[10];
         const char* start;
         const char* end;
+        size_t len = strlen(preload_str);
 
-        for (start = cfgbuf; start < cfgbuf + len; start = end + 1) {
-            for (end = start; end < cfgbuf + len && *end && *end != ','; end++)
+        for (start = preload_str; start < preload_str + len; start = end + 1) {
+            for (end = start; end < preload_str + len && *end && *end != ','; end++)
                 ;
             if (end > start) {
                 char uri[end - start + 1];
@@ -772,165 +795,206 @@ int init_trusted_files(void) {
                 snprintf(key, 10, "preload%d", npreload++);
 
                 ret = init_trusted_file(key, uri);
-                if (ret < 0)
-                    goto out;
+                if (ret < 0) {
+                    free(preload_str);
+                    return ret;
+                }
             }
         }
+
+        free(preload_str);
     }
 
-    cfgsize = get_config_entries_size(store, "sgx.trusted_files");
-    if (cfgsize <= 0)
+    /* read sgx.trusted_files entries from manifest and register them */
+    toml_table_t* manifest_sgx = toml_table_in(g_pal_state.manifest_root, "sgx");
+    if (!manifest_sgx)
         goto no_trusted;
 
-    free(cfgbuf);
-    cfgbuf = malloc(cfgsize);
-    if (!cfgbuf) {
-        ret = -PAL_ERROR_NOMEM;
-        goto out;
-    }
-
-    nuris = get_config_entries(store, "sgx.trusted_files", cfgbuf, cfgsize);
-    if (nuris <= 0)
+    toml_table_t* toml_trusted_files = toml_table_in(manifest_sgx, "trusted_files");
+    if (!toml_trusted_files)
         goto no_trusted;
 
-    tmp = strcpy_static(key, "sgx.trusted_files.", sizeof(key));
+    ssize_t toml_trusted_files_cnt = toml_table_nkval(toml_trusted_files);
+    if (toml_trusted_files_cnt <= 0)
+        goto no_trusted;
 
-    k = cfgbuf;
+    for (ssize_t i = 0; i < toml_trusted_files_cnt; i++) {
+        const char* toml_trusted_file_key = toml_key_in(toml_trusted_files, i);
+        assert(toml_trusted_file_key);
+        toml_raw_t toml_trusted_file_raw = toml_raw_in(toml_trusted_files, toml_trusted_file_key);
+        assert(toml_trusted_file_raw);
 
-    for (int i = 0; i < nuris; i++) {
-        len = strlen(k);
-        memcpy(tmp, k, len + 1);
-        k += len + 1;
-        len = get_config(store, key, uri, sizeof(uri));
-        if (len > 0) {
-            ret = init_trusted_file(key + static_strlen("sgx.trusted_files."), uri);
-            if (ret < 0)
-                goto out;
-        }
-    }
-
-no_trusted:
-
-    cfgsize = get_config_entries_size(store, "sgx.allowed_files");
-    if (cfgsize <= 0)
-        goto no_allowed;
-
-    free(cfgbuf);
-    cfgbuf = malloc(cfgsize);
-    if (!cfgbuf) {
-        ret = -PAL_ERROR_NOMEM;
-        goto out;
-    }
-
-    nuris = get_config_entries(store, "sgx.allowed_files", cfgbuf, cfgsize);
-    if (nuris <= 0)
-        goto no_allowed;
-
-    tmp = strcpy_static(key, "sgx.allowed_files.", sizeof(key));
-
-    k = cfgbuf;
-
-    for (int i = 0; i < nuris; i++) {
-        len = strlen(k);
-        memcpy(tmp, k, len + 1);
-        k += len + 1;
-        len = get_config(store, key, uri, sizeof(uri));
-        if (len <= 0) {
+        char* toml_trusted_file_str = NULL;
+        ret = toml_rtos(toml_trusted_file_raw, &toml_trusted_file_str);
+        if (ret < 0) {
+            SGX_DBG(DBG_E, "Invalid trusted file in manifest: \'%s\'\n", toml_trusted_file_key);
             continue;
         }
 
-        /* Normalize the uri */
+        ret = init_trusted_file(toml_trusted_file_key, toml_trusted_file_str);
+        if (ret < 0) {
+            free(toml_trusted_file_str);
+            return ret;
+        }
+
+        free(toml_trusted_file_str);
+    }
+
+no_trusted:
+    /* read sgx.allowed_files entries from manifest and register them */
+    if (!manifest_sgx)
+        goto no_allowed;
+
+    toml_table_t* toml_allowed_files = toml_table_in(manifest_sgx, "allowed_files");
+    if (!toml_allowed_files)
+        goto no_allowed;
+
+    ssize_t toml_allowed_files_cnt = toml_table_nkval(toml_allowed_files);
+    if (toml_allowed_files_cnt <= 0)
+        goto no_allowed;
+
+    for (ssize_t i = 0; i < toml_allowed_files_cnt; i++) {
+        const char* toml_allowed_file_key = toml_key_in(toml_allowed_files, i);
+        assert(toml_allowed_file_key);
+        toml_raw_t toml_allowed_file_raw = toml_raw_in(toml_allowed_files, toml_allowed_file_key);
+        assert(toml_allowed_file_raw);
+
+        char* toml_allowed_file_str = NULL;
+        ret = toml_rtos(toml_allowed_file_raw, &toml_allowed_file_str);
+        if (ret < 0) {
+            SGX_DBG(DBG_E, "Invalid allowed file in manifest: \'%s\'\n", toml_allowed_file_key);
+            continue;
+        }
+
         char norm_path[URI_MAX];
 
-        if (!strstartswith_static(uri, URI_PREFIX_FILE)) {
-            SGX_DBG(DBG_E, "Invalid URI [%s]: Allowed files must start with 'file:'\n", uri);
-            ret = -PAL_ERROR_INVAL;
-            goto out;
+        if (!strstartswith(toml_allowed_file_str, URI_PREFIX_FILE)) {
+            SGX_DBG(DBG_E, "Invalid URI [%s]: Allowed files must start with 'file:'\n",
+                    toml_allowed_file_str);
+            free(toml_allowed_file_str);
+            return -PAL_ERROR_INVAL;
         }
         static_assert(sizeof(norm_path) > URI_PREFIX_FILE_LEN, "`normpath` is too small");
         memcpy(norm_path, URI_PREFIX_FILE, URI_PREFIX_FILE_LEN);
 
         size_t norm_path_len = sizeof(norm_path) - URI_PREFIX_FILE_LEN;
 
-        ret = get_norm_path(uri + URI_PREFIX_FILE_LEN, norm_path + URI_PREFIX_FILE_LEN,
-                            &norm_path_len);
+        ret = get_norm_path(toml_allowed_file_str + URI_PREFIX_FILE_LEN,
+                            norm_path + URI_PREFIX_FILE_LEN, &norm_path_len);
+        free(toml_allowed_file_str);
+
         if (ret < 0) {
-            SGX_DBG(DBG_E, "Path (%s) normalization failed: %s\n", uri + URI_PREFIX_FILE_LEN,
-                    pal_strerror(ret));
-            goto out;
+            SGX_DBG(DBG_E, "Path (%s) normalization failed: %s\n",
+                    toml_allowed_file_str + URI_PREFIX_FILE_LEN, pal_strerror(-ret));
+            return ret;
         }
 
         register_trusted_file(norm_path, NULL, /*check_duplicates=*/false);
     }
 
 no_allowed:
-    ret = 0;
-
-    if (get_config(store, "sgx.allow_file_creation", cfgbuf, cfgsize) > 0 && cfgbuf[0] == '1')
-        g_allow_file_creation = true;
-    else
-        g_allow_file_creation = false;
-
-out:
-    free(cfgbuf);
-    return ret;
+    return 0;
 }
 
 int init_trusted_children(void) {
-    struct config_store* store = g_pal_state.root_config;
+    int ret;
 
-    char key[CONFIG_MAX], mrkey[CONFIG_MAX];
-    char uri[CONFIG_MAX], mr_enclave[CONFIG_MAX];
-
-    char* tmp1 = strcpy_static(key, "sgx.trusted_children.", sizeof(key));
-    char* tmp2 = strcpy_static(mrkey, "sgx.trusted_mrenclave.", sizeof(mrkey));
-
-    ssize_t cfgsize = get_config_entries_size(store, "sgx.trusted_mrenclave");
-    if (cfgsize <= 0)
+    /* read sgx.trusted_children and corresponding sgx.trusted_mrenclave entries from manifest */
+    toml_table_t* manifest_sgx = toml_table_in(g_pal_state.manifest_root, "sgx");
+    if (!manifest_sgx)
         return 0;
 
-    char* cfgbuf = malloc(cfgsize);
-    if (!cfgbuf)
-        return -PAL_ERROR_NOMEM;
+    toml_table_t* toml_trusted_children = toml_table_in(manifest_sgx, "trusted_children");
+    if (!toml_trusted_children)
+        return 0;
 
-    int nuris = get_config_entries(store, "sgx.trusted_mrenclave", cfgbuf, cfgsize);
-    if (nuris > 0) {
-        char* k = cfgbuf;
-        for (int i = 0; i < nuris; i++) {
-            int len = strlen(k);
-            memcpy(tmp1, k, len + 1);
-            memcpy(tmp2, k, len + 1);
-            k += len + 1;
+    ssize_t toml_trusted_children_cnt = toml_table_nkval(toml_trusted_children);
+    if (toml_trusted_children_cnt <= 0)
+        return 0;
 
-            ssize_t ret = get_config(store, key, uri, sizeof(uri));
-            if (ret < 0)
-                continue;
-
-            ret = get_config(store, mrkey, mr_enclave, sizeof(mr_enclave));
-            if (ret > 0)
-                register_trusted_child(uri, mr_enclave);
-        }
+    toml_table_t* toml_trusted_mrenclaves = toml_table_in(manifest_sgx, "trusted_mrenclave");
+    if (!toml_trusted_mrenclaves) {
+        SGX_DBG(DBG_E, "No corresponding \'sgx.trusted_mrenclave\' to \'sgx.trusted_children\'\n");
+        return -PAL_ERROR_INVAL;
     }
-    free(cfgbuf);
+
+    ssize_t toml_trusted_mrenclaves_cnt = toml_table_nkval(toml_trusted_mrenclaves);
+    if (toml_trusted_mrenclaves_cnt != toml_trusted_children_cnt) {
+        SGX_DBG(DBG_E, "No corresponding \'sgx.trusted_mrenclave\' to \'sgx.trusted_children\'\n");
+        return -PAL_ERROR_INVAL;
+    }
+
+    for (ssize_t i = 0; i < toml_trusted_mrenclaves_cnt; i++) {
+        const char* toml_trusted_mrenclave_key = toml_key_in(toml_trusted_mrenclaves, i);
+        assert(toml_trusted_mrenclave_key);
+        toml_raw_t toml_trusted_mrenclave_raw = toml_raw_in(toml_trusted_mrenclaves,
+                                                            toml_trusted_mrenclave_key);
+        assert(toml_trusted_mrenclave_raw);
+
+        /* find corresponding trusted_children from trusted_mrenclave */
+        toml_raw_t toml_trusted_child_raw = toml_raw_in(toml_trusted_children,
+                                                        toml_trusted_mrenclave_key);
+        if (!toml_trusted_child_raw) {
+            SGX_DBG(DBG_E, "No \'sgx.trusted_children.%s\' found\n", toml_trusted_mrenclave_key);
+            return -PAL_ERROR_INVAL;
+        }
+
+        char* toml_trusted_mrenclave_str = NULL;
+        ret = toml_rtos(toml_trusted_mrenclave_raw, &toml_trusted_mrenclave_str);
+        if (ret < 0) {
+            SGX_DBG(DBG_E, "Invalid trusted mrenclave in manifest: \'%s\'\n",
+                    toml_trusted_mrenclave_key);
+            return -PAL_ERROR_INVAL;
+        }
+
+        char* toml_trusted_child_str = NULL;
+        ret = toml_rtos(toml_trusted_child_raw, &toml_trusted_child_str);
+        if (ret < 0) {
+            SGX_DBG(DBG_E, "Invalid trusted child in manifest: \'%s\'\n",
+                    toml_trusted_mrenclave_key);
+            free(toml_trusted_mrenclave_str);
+            return -PAL_ERROR_INVAL;
+        }
+
+        ret = register_trusted_child(toml_trusted_child_str, toml_trusted_mrenclave_str);
+        free(toml_trusted_mrenclave_str);
+        free(toml_trusted_child_str);
+
+        if (ret < 0)
+            return ret;
+    }
+
     return 0;
 }
 
 int init_file_check_policy(void) {
-    char cfgbuf[CONFIG_MAX];
-    ssize_t ret = get_config(g_pal_state.root_config, "sgx.file_check_policy",
-                             cfgbuf, sizeof(cfgbuf));
+    int ret;
 
-    if (ret > 0) {
-        if (!strcmp_static(cfgbuf, "strict"))
-            set_file_check_policy(FILE_CHECK_POLICY_STRICT);
-        else if (!strcmp_static(cfgbuf, "allow_all_but_log"))
-            set_file_check_policy(FILE_CHECK_POLICY_ALLOW_ALL_BUT_LOG);
-        else
-            INIT_FAIL(PAL_ERROR_INVAL, "unknown file check policy");
-
-        SGX_DBG(DBG_S, "File check policy: %s\n", cfgbuf);
+    char* file_check_policy_str = NULL;
+    ret = toml_string_in(g_pal_state.manifest_root, "sgx.file_check_policy",
+                         &file_check_policy_str);
+    if (ret < 0) {
+        SGX_DBG(DBG_E, "Cannot parse \'sgx.file_check_policy\' "
+                       "(the value must be put in double quotes!)\n");
+        return -PAL_ERROR_INVAL;
     }
 
+    if (!file_check_policy_str)
+        return 0;
+
+    if (!strcmp(file_check_policy_str, "strict")) {
+        set_file_check_policy(FILE_CHECK_POLICY_STRICT);
+    } else if (!strcmp(file_check_policy_str, "allow_all_but_log")) {
+        set_file_check_policy(FILE_CHECK_POLICY_ALLOW_ALL_BUT_LOG);
+    } else {
+        SGX_DBG(DBG_E, "Unknown value for \'sgx.file_check_policy\' "
+                "(allowed: `strict`, `allow_all_but_log`)'\n");
+        free(file_check_policy_str);
+        return -PAL_ERROR_INVAL;
+    }
+
+    SGX_DBG(DBG_S, "File check policy: %s\n", file_check_policy_str);
+    free(file_check_policy_str);
     return 0;
 }
 

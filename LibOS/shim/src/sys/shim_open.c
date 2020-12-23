@@ -2,28 +2,24 @@
 /* Copyright (C) 2014 Stony Brook University */
 
 /*
- * shim_open.c
- *
- * Implementation of system calls: "read", "write", "open", "creat", "openat",
- * "close", "lseek", "pread64", "pwrite64", "getdents", "getdents64",
- * "fsync", "truncate" and "ftruncate".
+ * Implementation of system calls: "read", "write", "open", "creat", "openat", "close", "lseek",
+ * "pread64", "pwrite64", "getdents", "getdents64", "fsync", "truncate" and "ftruncate".
  */
 
-// FIXME: Moving Linux includes first causes a bunch of "error: ‘S_IFLNK’ undeclared" errors.
-#include "shim_fs.h"
-#include "shim_handle.h"
-#include "shim_internal.h"
-#include "shim_table.h"
-#include "shim_thread.h"
-#include "shim_utils.h"
+#include <dirent.h>
+#include <errno.h>
+#include <linux/fcntl.h>
 
 #include "pal.h"
 #include "pal_error.h"
-
-#include <errno.h>
-#include <dirent.h>
-#include <linux/stat.h>
-#include <linux/fcntl.h>
+#include "shim_fs.h"
+#include "shim_handle.h"
+#include "shim_internal.h"
+#include "shim_lock.h"
+#include "shim_table.h"
+#include "shim_thread.h"
+#include "shim_utils.h"
+#include "stat.h"
 
 int do_handle_read(struct shim_handle* hdl, void* buf, int count) {
     if (!(hdl->acc_mode & MAY_READ))
@@ -90,30 +86,7 @@ size_t shim_do_write(int fd, const void* buf, size_t count) {
 }
 
 int shim_do_open(const char* file, int flags, mode_t mode) {
-    if (!file || test_user_string(file))
-        return -EFAULT;
-
-    if (!(flags & O_CREAT)) {
-        /* `mode` should be ignored if O_CREAT is not specified, according to man */
-        mode = 0;
-    } else {
-        /* This isn't documented, but that's what Linux does. */
-        mode &= 07777;
-    }
-
-    struct shim_handle* hdl = get_new_handle();
-    if (!hdl)
-        return -ENOMEM;
-
-    int ret = 0;
-    ret = open_namei(hdl, NULL, file, flags, mode, NULL);
-    if (ret < 0)
-        goto out;
-
-    ret = set_new_fd_handle(hdl, flags & O_CLOEXEC ? FD_CLOEXEC : 0, NULL);
-out:
-    put_handle(hdl);
-    return ret;
+    return shim_do_openat(AT_FDCWD, file, flags, mode);
 }
 
 int shim_do_creat(const char* path, mode_t mode) {
@@ -135,7 +108,7 @@ int shim_do_openat(int dfd, const char* filename, int flags, int mode) {
     struct shim_dentry* dir = NULL;
     int ret = 0;
 
-    if ((ret = get_dirfd_dentry(dfd, &dir)) < 0)
+    if (*filename != '/' && (ret = get_dirfd_dentry(dfd, &dir)) < 0)
         return ret;
 
     struct shim_handle* hdl = get_new_handle();
@@ -153,7 +126,8 @@ int shim_do_openat(int dfd, const char* filename, int flags, int mode) {
 out_hdl:
     put_handle(hdl);
 out:
-    put_dentry(dir);
+    if (dir)
+        put_dentry(dir);
     return ret;
 }
 
@@ -549,6 +523,9 @@ int shim_do_fdatasync(int fd) {
 }
 
 int shim_do_truncate(const char* path, loff_t length) {
+    if (length < 0)
+        return -EINVAL;
+
     struct shim_dentry* dent = NULL;
     int ret = 0;
 
@@ -583,7 +560,6 @@ int shim_do_truncate(const char* path, loff_t length) {
         goto out_handle;
 
     ret = fs->fs_ops->truncate(hdl, length);
-    flush_handle(hdl);
 out_handle:
     put_handle(hdl);
 out:
@@ -591,6 +567,9 @@ out:
 }
 
 int shim_do_ftruncate(int fd, loff_t length) {
+    if (length < 0)
+        return -EINVAL;
+
     struct shim_handle* hdl = get_fd_handle(fd, NULL, NULL);
     if (!hdl)
         return -EBADF;
