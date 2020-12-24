@@ -11,12 +11,7 @@
 #include "sgx_arch.h"
 #include "sgx_tls.h"
 
-/* sgx.h header from the Intel SGX driver assumes that `__packed` macro was defined */
-#ifndef __packed
-#define __packed __attribute__((packed))
-#endif
-#include "sgx.h"
-#undef __packed
+#include "gsgx.h"
 
 __attribute__((__used__)) static void dummy(void) {
     /* defines in sgx_arch.h */
@@ -155,7 +150,7 @@ __attribute__((__used__)) static void dummy(void) {
     DEFINE(ENCLAVE_STACK_SIZE, ENCLAVE_STACK_SIZE);
     DEFINE(ENCLAVE_SIG_STACK_SIZE, ENCLAVE_SIG_STACK_SIZE);
     DEFINE(DEFAULT_ENCLAVE_BASE, DEFAULT_ENCLAVE_BASE);
-    DEFINE(DEFAULT_HEAP_MIN, DEFAULT_HEAP_MIN);
+    DEFINE(MMAP_MIN_ADDR, MMAP_MIN_ADDR);
 
     /* pal_linux.h */
     DEFINE(PAGESIZE, PRESET_PAGESIZE);
@@ -179,8 +174,5 @@ __attribute__((__used__)) static void dummy(void) {
     /* SGX_DCAP */
 #ifdef SGX_DCAP
     DEFINE(SGX_DCAP, SGX_DCAP);
-#endif
-#ifdef SGX_DCAP_16_OR_LATER
-    DEFINE(SGX_DCAP_16_OR_LATER, SGX_DCAP_16_OR_LATER);
 #endif
 }
